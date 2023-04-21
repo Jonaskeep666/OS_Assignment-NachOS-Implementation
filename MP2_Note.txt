@@ -1,0 +1,983 @@
+===============================================================
+Part 1 Trace code
+===============================================================
+
+# Contents
+[A] User Program 的執行
+1.	NachOS 的 main.cc 執行 User program
+
+[B] class Kernel
+2.	[threads/kernel.h]		class Kernel
+
+[C]	noff 檔案結構 & 記憶體
+3.	[coff2noff/coff2noff.c] (闡述 NachOS 讀到的檔案 要如何解讀其結構)
+4.	[machine/translate.h]	class TranslationEntry = Page Table 的結構
+5.	[userprog/addrspace.h]	class AddrSpace
+6.	[machine/machine,h]		class Machine 的部分注釋
+7.	2種 Translate 函式 的差異
+
+[D] Thread 的執行
+8.	[threads/thread.h]		class Thread = TCB
+9.	[threads/scheduler.h]	class Scheduler = readyList + toBeDestroyed
+10.	Thread 的 Context Switch
+11.	[threads/kernel.c]		Kernel::ExecAll() & int Kernel::Exec(char* name)
+
+
+[A] User Program 的執行
+
+1.	NachOS 的 main.cc 執行 User program
+	1>	main.cc = NachOS 主程式
+		(1)	根據 cmd 傳入參數，設定 初始狀態
+		(2)	建立/初始化 Kernel物件 = 建立 OS管理 Threads、Memory、I/O、File 所需的物件
+		(3)	(Option) 測試 Kernel 功能是否正常
+		(4) kernel->ExecAll(); = 執行 User program
+
+	2>	mainThread 執行 Kernel::ExecAll()
+		(1)	依序對 所有待執行(讀入)的 檔案=Program 建立各自的 TCB(PCB) & Page Table
+			
+			主要呼叫 int Kernel::Exec(char* name)
+			-	Create 一個 TCB(PCB) & Page Table，並回傳 其ID
+				-	t[threadNum] = new Thread(name, threadNum);
+				-	t[threadNum]->space = new AddrSpace();
+
+			-	配置 & 初始化 new Thread，並「排入 ReadyQueue」
+				= t[threadNum]->Fork((VoidFunctionPtr) &ForkExecute, (void *)t[threadNum]);
+				-	Thread::Fork(func, arg) = StackAllocate(func, arg) + Thread 排入 ReadyQueue
+
+				-	StackAllocate(func, arg)
+					-	配置/建立 Kernel stack & 設定「new Thread」的「起始Reg值」
+					-	包含 ThreadRoot()位址、未來要執行 ForkExecute(..) & 傳入參數 = new Thread位址
+
+					
+		(2)	將 mainThread Finish() 掉
+			-	Thread::Finish() = ThreadFinish()
+				-	關閉 interrupt & 將 mainThread 設為 Sleep(TRUE)
+
+	3>	此時，mainThread 進入結束程序，並 Pop out ReadyQueue 中的 nextThread 執行
+		(1)	Thread::Sleep (bool finishing)
+			-	自行設定 暫停/結束 currentThread(Block) 
+				& 切到其他 Thread 執行 = 呼叫kernel->scheduler->Run(nextThread, finishing)
+
+			-	若 ReadyQueue 為空，則 Idle 並等待下一個 Interrupt 將 Thread 放進 ReadyQueue 
+			-	是不可中斷的「原子操作(Atomic operation)」
+
+		(2)	Scheduler::Run(nextThread, finishing)
+			-	依照 參數finishing 決定 暫存/終結() oldThread
+			-	Context Switch：切換到 nextThread執行
+				(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+				(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+
+			-	註：若後來切回 oldThread，也會在此回復 模擬CPU Reg值
+
+	4>	SWITCH(oldThread, nextThread) in switch.S
+		-	將 oldThread 目前所使用的 CPU Reg(s) 暫存至 oldThread之TCB(PCB) 中
+		-	將 nextThread 暫存在 nextThread之TCB(PCB)的 Reg(s)值 載入「目前 Host CPU 的 Reg(s)」
+		-	回復 nextThread 之前的 PC值 給「目前的Host PC」
+			(1)	若 nextThread 剛建立：Host PC 指向 ThreadRoot(..)
+				-	在 Kernel::Exec() -> Thread::Fork(func, arg) -> StackAllocate(func, arg) 中事先設定
+				-	接下來會執行 ThreadRoot(..) -> 5>
+			(2) 若 nextThread 執行到一半：Host PC 指向 之前的 t2 PC -> 7>
+
+	5>	ThreadRoot(InitialPC, InitialArg, WhenDonePC, StartupPC) in switch.S
+		-	依序呼叫 ThreadBegin() -> func(Arg) -> ThreadFinish()
+		(1)	ThreadBegin() = Thread::Begin()
+			-	刪去 toBeDestroyed 指向的 Thread(此處為 mainThread) & 啟用 interrupt
+
+		(2)	func(Arg) = ForkExecute(..) = ForkExecute(Thread *t)
+			-	將 Thread(t)物件 對應的 Program 載入記憶體 & 配置 Page Table & 請 machine 開始執行指令
+			-	AddrSpace::Load(char *fileName)
+				-	將 User program (noff檔案=fileName) 的各個 Segment內容 載入到 (模擬的)實體記憶體中
+				-	此處會分配 Free Frame 給 Thread 的 Page Table，並配置好 User Stack
+			-	AddrSpace::Execute(char *fileName)
+				-	指派 Page Table & 將其位址 載入machine，並請 machine 開始執行指令
+				-	kernel->currentThread->space = this;
+					(this = AddrSpace物件 = Page Table 先前 已在 Kernel::Exec(char* name) 創建)
+				-	this->InitRegisters(); & this->RestoreState();
+					-	設定 Regs、PC 的初始值(PC=0) & 載入 Thread Page Table的位址 到 machine
+
+				-	kernel->machine->Run() -> 6>
+
+	6>	Machine::Run() in mipssim.cc
+		-	CPU 開始「真正」執行 User Program File 的指令
+			(由 ForkExecute(..) -> AddrSpace::Execute(..) -> Machine::Run() )
+		-	主要流程
+			-	設為 UserMode
+			-	呼叫 OneInstruction(instr)
+			-	模擬 時間前進 1 Tick = kernel->interrupt->OneTick();
+
+		-	Machine::OneInstruction(Instruction *instr)
+			-	從 (模擬)PC 指向的資料，取出/執行一道指令
+			-	若是 new Thread，(模擬)PC 會從「虛擬記憶體」第0筆指令 開始讀取
+				(因為在 AddrSpace::Execute() 中 this->InitRegisters() 已經將 PC 設成0)
+				(在讀取的過程中 Machine::ReadMem(..) & Machine::WriteMem(..) 會呼叫 Machine::Translate() 翻譯成實體位址)
+
+[B] class Kernel
+
+2.	class Kernel
+	-	建立的 Kernel 物件 = Global 變數
+	1>	public 方法
+		(1)	初始化函數
+			-	建構子 kernel(..)
+				-	建立 kernel 物件
+				-	根據命令列參數，設定初始化旗標
+			-	解構子 ~kernel()
+			-	Initialize() 
+				-	對 kernel物件 初始化 = 將 眾多功能的指標 指向 動態配置的物件(new Object)
+
+		(2)	Execution/Thread 相關函數
+			-	ExecAll()
+				-	依序對 所有待執行的檔案 = User Program 建立 TCB / Page Table (依序呼叫 Exec(execfile[i]) )
+				-	初始化所有 TCB & PageTable 後
+					關閉 Interrupt & 將此 Thread 設為 Sleep(TRUE) = 結束 Thread 並切到其他 Thread 執行
+			-	int Exec(char* name);
+				-	Create 一個 TCB(PCB) & Page Table，並回傳 其ID
+				-	配置 & 初始化 new Thread
+
+			-	void ThreadSelfTest();	// 測試 threads & synchronization 的功能
+			-	Thread* getThread(int threadID){return t[threadID];}    // 查看 Thread ID 的方法
+
+		(3)	Ohter Members
+			-	測試用函數
+				-	void ConsoleTest();         // interactive console self test
+				-	void NetworkTest();         // interactive 2-machine network test
+			-	I/O & File 相關函數
+				-	void PrintInt(int number); 	
+				-	int CreateFile(char* filename); // fileSystem call
+				-	OpenFileId OpenFile(char* name);                       
+				-	int WriteFile(char* buffer, int size, OpenFileId id); 
+				-	int ReadFile(char* buffer, int size, OpenFileId id);  
+				-	int CloseFile(OpenFileId id); 
+
+	2>	public 變數 (Global 變數)
+		//	以下大多是指標，會在 Initialize(..) 中 指向「動態配置的物件(new Object)」
+		-	Thread *currentThread;	// the thread holding the CPU (正在使用CPU的Thread)
+    	-	Scheduler *scheduler;	// the ready list
+		-	Interrupt *interrupt;	// interrupt status
+
+		-	Statistics *stats;		// performance metrics
+		-	Alarm *alarm;			// the software alarm clock    
+		-	Machine *machine;      	// the simulated CPU 
+
+		-	SynchConsoleInput *synchConsoleIn;	// 指向 操作 I/O 的物件
+		-	SynchConsoleOutput *synchConsoleOut;// 指向 操作 I/O 的物件
+		-	SynchDisk *synchDisk;
+		-	FileSystem *fileSystem;     
+		-	PostOfficeInput *postOfficeIn;
+		-	PostOfficeOutput *postOfficeOut;
+
+		-	int hostName;           // machine identifier
+
+	3>	private 變數
+		-	Thread* t[10]; 			//	指向 Thread 的指標陣列(共可指向 10條 Thread)
+		-	char*   execfile[10];	//	指向 開啟檔案名稱 的指標陣列(共可指向 10個 File)
+		-	int execfileNum;		//	開啟檔案 數量
+		-	int threadNum;			//	開啟Threads 數量
+
+		-	bool randomSlice;		// enable pseudo-random time slicing
+		-	bool debugUserProg;     // single step user program
+		-	double reliability;     // likelihood messages are dropped
+		-	char *consoleIn;        // file to read console input from
+		-	char *consoleOut;       // file to send console output to
+
+[C]	noff 檔案結構 & 記憶體
+
+3.	coff2noff.c (闡述 NachOS 讀到的檔案 要如何解讀其結構)
+	1>	coff檔案(x.coff):
+		-	一種 通用目的檔 的檔案格式（英語：Common Object File Format，縮寫為COFF）
+			用於執行檔、目的碼、共享庫（shared library）的檔案格式
+		-	在本次作業的角色是 存放 User Program
+			包含 Header(s) & User Program 的程式碼
+
+	2>	noff檔案: 
+		-	NachOS 自己定義的檔案格式，以供NachOS 讀取/執行
+			由 coff檔案 轉換而來，可視為一種簡化版本的 noff檔案(因為兩者的存放的資訊雷同)
+		-	在本次作業的角色是 存放 User Program
+			包含 Header(s) & User Program 的程式碼
+
+	3>	檔案結構
+		-	coff檔案
+			-	Headers
+				(1)	File Header: 主要存放 f_magic & f_nscns(Section數量)
+				(2)	System Header: 主要存放系統識別用的 magic number & ...
+				(3)	Section Header: 主要存放各個Section的名稱、位址、尺寸
+			-	Section 的資料 = User progam 的內容
+				-	.text			-- read-only executable instructions (程式碼) 
+				-	.data			-- initialized data (已經初始化 Global/Static 變數)
+				-	.bss/.sbss 		-- uninitialized data (尚未初始化 Global/Static 變數，且初始值設為0)
+
+				-	(Optional).rdata	-- read-only data (e.g., string literals).
+
+		-	noff檔案
+			-	Header(從coff簡化成「只有一個」叫 NoffHeader)
+				-	存放 noffMagic & 各個 Section 的 虛擬位址、在檔案的位址、Size
+			-	Section 的資料 = User progam 的內容
+
+	4>	主要用途：本檔案主要用來將 coff檔案 轉成 NachOS 自己定義的 noff檔案(NachOS 只讀 noff檔案)
+		-	提供轉換函數
+			透過 SwapHeader(..)，將 word(4 bytes)/short(2 bytes)的資料 統一轉換成 little endian 
+			因為 simulated machine/NachOS 採用 little endian 
+			
+		-	主要 兩個工作
+			(1)	將 coff檔案的 Header(s) 轉換成 noff檔案的 Header(s)
+			(2)	將 coff檔案的所有 Segment 資料 寫入 noff檔案
+
+		-	一個有趣的用法
+			#define ReadStruct(f,s) 	Read(f,(char *)&s,sizeof(s))
+			從 file(f) 讀取 sizeof(s) Bytes 的大小，存入 結構指標(s)指向的空間
+
+4.	class TranslationEntry = Page Table Entry 的結構
+	-	machine 內的 translate.h 有硬體支援的 Page Table 結構(不可更動)
+	(1) virtualPage(Page Num) - physicalPage(Frame Num)
+	(2) valid(Valid-invalid Bit)
+	(3) readOnly(不可修改)
+	(4) use(Ref. Bit): 是否被存取過
+	(5) dirty(Dirty Bit): 是否被修改過
+
+5.	class AddrSpace
+	-	一個 Process/Thread 會建立一個 AddrSpace物件 = Page Table(預設128格)
+
+	1>	public 方法
+    	(1)	建構子 & 解構子
+			-	AddrSpace();			// 是用來 建立/初始化 Page Table
+				-	Page Table 最多 128個Entry (定義在 machine.h)
+			-	~AddrSpace();			// 刪去 Page Table
+
+		(2) bool Load(char *fileName);
+			-	由 ForkExecute(..) 呼叫
+			-	將 User program (noff檔案=fileName) 載入到 主記憶體中
+			-	決定 Program 的大小 = Code + Data + BSS + Stack
+			-	將 Program 各個 Segment 的內容 Load 到實體記憶體中
+				(此處會分配 Free Frame 給 Thread 的各個 Page，包含 配置 User Stack)
+			-	若 檔案開啟失敗 return false
+
+			-	Note: 此處會「配置 User Mode 的 Stack」
+				-	方式：將除了 Code Seg & Data Seg 以外的區域，規劃為 stack
+				-	由 InitRegisters() 可知，stack 從 [numPages * PageSize - 16]位址 開始，到 Data Seg 末端結束
+				-	Thread(Program) 的 記憶體結構為
+					(高位址) stack & Heap -> Data Seg -> Code Seg (位址=0)
+
+		(3)	void Execute(char *fileName);	// 先了解(4)的函數
+            - 背景：在 ForkExecute(..) 被呼叫
+                   & 假設 fileName 代表的 Program 已載入 Memory
+            - 主要功能：指派 Page Table & 將其位址 載入machine，並請 machine 開始執行指令
+            (1) kernel->currentThread->space = this; // 指派 currentTread 的 TCB(PCB) = this
+                (AddrSpace物件 = Page Table = this 先前 已被 Kernel::Exec(char* name) 創建)
+            (2) this->InitRegisters();               // 重置 Register(s) = 設定 PC、Reg(s)
+            (3) this->RestoreState();                // 載入 Thread Page Table的位址 到 machine
+            (4) kernel->machine->Run();              // CPU 開始執行 User Program 的指令
+
+		(4)	儲存/回復 Thread State 的函數
+    		-	void SaveState();			// 在 Context switch時，儲存 Thread 的 Page Table的位址/資訊
+   			-	void RestoreState();		// 在 Context switch時，回復 Thread 的 Page Table的位址/資訊
+											// (我的感覺 是告訴 模擬MMU Thread 的 Page Table的位址/資訊)
+				-	MMU 運作之 Thread 的 Page Table 會由 指標 = kernel->machine->pageTable 來指
+					kernel->machine->pageTable = pageTable;
+
+    	(5)	檢查是否異常 & 翻譯位址 存入 *paddr
+			ExceptionType Translate(unsigned int vaddr, unsigned int *paddr, int mode);
+			-	在 addrspace.cc 實作
+			-	3個參數
+				-	vaddr 譯前位址
+				-	paddr 譯後位址
+				-	isReadWrite 是否會對 Page 進行修改
+					有2種 0(Read-Only)/ 1(Read-Write)
+
+			-	主要功能: 實作 1種翻譯方案的地方(Page Table)
+				-	回傳 狀態
+					-	AddressErrorException	(p > Page總數)
+					-	ReadOnlyException		(權限不同)
+					-	BusErrorException		(f > frame總數)
+					-	NoException				(翻譯成功)
+				-	設定 use(Ref. bit) & dirty(Dirty bit)
+				-	翻譯位址: 譯後位址(*paddr) = f(pfn) * PageSize + offset
+
+	2>	private 方法
+    	-	void InitRegisters();
+			-	執行 User program 之前，重置 Register(s) = 先清掉 CPU Reg 殘值
+				-	通用暫存器Reg[i]=0
+			-	這裏指示了 Thread 在 Virtual Space 的空間規劃
+				(1)	程式碼的位址 從 0 開始
+					-	PCReg = 0、NextPCReg = 4
+				(2)	Stack 底部 從 numPages * PageSize - 16 開始
+					多-16 只是為了防止 Overflow 
+					-	StackReg(Stack底部位址) = numPages * PageSize - 16
+
+			-	Note: 以上的暫存器數值，會被存在 TCB(PCB) 中，也就是 Thread 物件 的 userRegisters[N]中
+				是 userRegisters[N] 的原因為「以上 Reg 都是模擬CPU 的 Reg」
+
+	3>	private 變數
+		(1)	TranslationEntry *pageTable;	// 指向 Page Table Entry 的指標，存放 Page Table 的起始位址
+											// Assume linear page table translation for now!
+    	(2)	unsigned int numPages;			// Number of pages in the virtual address space
+											// Process 佔用多少 Page/frame數目
+
+6.	class Machine 的部分注釋
+	0>	註記一下，machine.h 有定義
+		(1)	PageSize = 128 Bytes		// 代表 模擬機器提供的 FrameSize
+		(2)	NumPhysPages = 128			// 代表 模擬機器提供的實體記憶體 的 frame數目
+			MemorySize = NumPhysPages * PageSize
+
+		(3)	TLBSize = 4					// 代表 模擬機器提供的 TLB 的 Entry 數目
+
+	1>	public 方法
+		(1)	建構子、解構子
+		(2)	Run() = CPU 開始執行 User Program 的指令
+			-	由 Kernel::Exec() -> ForkExecute() -> AddrSpace::Execute() 呼叫
+			-	主要流程
+			(0)	陷入無窮迴圈 for(;;)
+			(1)	設為 UserMode
+			(2)	OneInstruction(instr);			// 從 PC 指向的資料，取出/執行一道指令
+				(因在 AddrSpace::Execute() 中 this->InitRegisters() 已經將 PC 設成0)
+				(故 此時 PC 會從「虛擬記憶體」第0筆指令 開始讀取 )
+			(3)	kernel->interrupt->OneTick(); 	// 模擬 時間前進 1 Tick
+
+		(3)	存取 Register 的函式
+			-	ReadRegister(..)、WriteRegister(..)
+
+		(4)	存取 Memory 的函式 (實作在 translate.cc)
+			-	ReadMem(int addr, int size, int* value);		
+				WriteMem(int addr, int size, int* value);
+			-	主要功能
+				-	呼叫 Machine::Translate(..) 將 addr(虛擬位址) 轉成 physicalAddress(實體位址)
+					若是 ReadMem(..) 則設定 Translate(..)的writing參數=False
+					若是 WriteMem(..) 則設定 Translate(..)的writing參數=True
+				-	根據 size 存取資料: 讀入 *value 或從 *value 寫入
+		
+	2>	public 變數
+		(1) char *mainMemory;			// 模擬的主記憶體，用一個 char指標 指向「模擬的主記憶體空間」
+			-	將 Process 的虛擬記憶體 轉成 實體記憶體  有兩種方案
+				a.	傳統的單一 Page Table (若 TLB 沒啟用(NULL))
+				b.	軟體模擬的 TLB (若 TLB 啟用(non-NULL))
+
+			-	TLB pointer 為 *read-only*，除非 Kernel 要清空 TLB
+
+			-	實作重點：Kernel 可以也可以採用 segmented paging 的方式管理記憶體
+		(2)	TranslationEntry *tlb;		// 指向 TLB 的指標
+		(3)	pageTable
+			-	TranslationEntry *pageTable;
+			-	unsigned int pageTableSize;
+
+	3>	private 方法
+		(1)	void DelayedLoad(int nextReg, int nextVal);		
+			-	將 下個存取的 Reg & Val 延遲處理，見 MP1
+		(2)	void OneInstruction(Instruction *instr);
+			-	主要功能：從 PC 指向的資料，取出/執行一道指令
+			-	ReadMem(registers[PCReg], 4, &raw) = 從 PC指向位址 取4Bytes 資料
+
+		(3)	檢查是否異常 & 翻譯位址 存入 *physAddr
+			ExceptionType Translate(int virtAddr, int* physAddr, int size, bool writing);
+			-	在 translate.cc 實作
+			-	每次使用 WriteMem(..) & ReadMem(..) 都會呼叫到
+				其中 WriteMem(..) & ReadMem(..) 用於 Machine::OneInstruction() 內部
+
+			-	4個參數
+				-	virtAddr 譯前位址
+				-	physAddr 譯後位址
+				-	size	 存取資料的大小，有3種(1、2、4 Byte)
+				-	writing  是否會對 Page 進行修改(1修改/0不修改)
+
+			-	主要功能: 實作 2種翻譯方案的地方(Page Table 或 TLB)
+				-	回傳 狀態
+					-	AddressErrorException	(Alignment problem / p > Page總數)
+					-	PageFaultException		
+						-	該 page 為 invalid，進入 Page Fault Trap
+						-	TLB miss，進入 Page Fault Trap
+					-	ReadOnlyException		(試圖寫入 Read-only Page)
+					-	BusErrorException		(f > frame總數)
+					-	NoException				(翻譯成功)
+				-	設定 use(Ref. bit) & dirty(Dirty bit)
+				-	翻譯位址: 譯後位址(*physAddr) = pageFrame(f) * PageSize + offset
+
+			-	Note: Alignment problem 對齊問題(不太懂)
+				-	若 size=2，virtAddr須為2個倍數(virtAddr & 0x1 = 1 表示 virtAddr必不為偶數)
+				-	若 size=4，virtAddr須為4個倍數(virtAddr & 0x3 = 1 表示 virtAddr必不為4的倍數，因為4的倍數必有 末2位元為0)
+
+		(4) RaiseException(..)、Debugger()、DumpState()		// 例外事件處理函式、Debugger、印出狀態函式，見 MP1
+
+	4>	private 變數
+		(1)	int registers[NumTotalRegs];
+		(2)	bool singleStep;	// debugger時會用到
+		(3)	int runUntilTime;	// debugger時會用到
+
+7.	2種 Translate 函式 的差異
+	1>	AddrSpace::Translate(..)	// 實作 1種翻譯方案的地方(Page Table)
+		-	目前還沒找到誰會呼叫它
+
+	2>	Machine::Translate(..)		// 實作 2種翻譯方案的地方(Page Table 或 TLB)
+		-	每次使用 WriteMem(..) & ReadMem(..) 都會呼叫到
+			其中 WriteMem(..) & ReadMem(..) 用於 Machine::OneInstruction() 內部
+			故為目前「使用中」的 翻譯位址實作
+
+[D] Thread 的執行
+
+8.	class Thread
+	-	建立的 Thread 物件 = Thread Control Block = 儲存 Thread 所需的資訊
+	-	所有的 Thread 都有
+		(1)	stack/stackTop	// Kernel Stack空間的 起點 & 終點，兩者撐開整個空間
+			-	stack 指向低位址
+			-	stackTop 指向高位址
+			-	注意!!!! Stack 從 高位址往下長
+		(2)	machineState	// Context Switch 時 儲存 Host CPU registers的空間
+		(3)	status			// Thread 狀態(running/ready/blocked)
+
+	-	註記一下 thread.h 有定義 ThreadStackSize & Thread state
+		(1)	const int StackSize = (8 * 1024);	// in words
+		(2)	enum ThreadStatus { JUST_CREATED, RUNNING, READY, BLOCKED, ZOMBIE };
+			-	主要有3種狀態: READY->RUNNING->BLOCKED(Waiting)
+			-	JUST_CREATED: 還沒進 Memory
+			-	ZOMBIE: Thread已結束執行，但 PCB還在，類似 Terminated
+
+	-	比較 addrspace.h 定義的 UserStackSize(1024) & thread.h 定義的 StackSize(8*1024)
+		(1)	UserStackSize(1024)
+			-	是在 AddrSpace::Load() 中，配置給 User Program 使用的 User Stack
+			-	其對應的實體空間是「模擬的」實體記憶體 machine->mainMemory[]
+			-	在 ForkExecute(..) -> machine->Run() 真正執行 ProgramFile 的內容時，才使用
+			
+		(2)	StackSize(8*1024)
+			-	是在 StackAllocate() 中，配置給 Thread 用於「函數轉換」的 Kernel Stack
+			-	其對應的實體空間是「Host的」實體記憶體
+			-	在 Kernel 端，針對 Host 系統 作 Context Switch(SWITCH)、流程控制(ThreadRoot)時，會用到
+
+	1>	宣告順序固定的 private 成員
+		(1)	int *stackTop;			 				// 指向 Thread Kernel Stack 頂部的指標
+    	(2)	void *machineState[MachineStateSize]; 	// 儲存所有的 CPU Register (最多75個 Reg)
+		-	原因
+			-	若 class生成的物件 是動態配置(new出來的)在 Heap(有低位址往上長)
+			-	成員變數 在記憶體的位址 按宣告順序，由低位址->高位址 儲存
+			-	故 Thread物件在記憶體的結構 如圖
+			-	如此結構 方便 SWITCH(..)函數 取用 Thread物件 (in switch.S)
+
+  	2>	public 方法
+		(1)	建構子 & 解構子
+    		-	Thread(char* debugName, int threadID);
+				-	初始化 TCB(PCB): 設定 ID、name、stack、stackTop、status
+				-	指向 Page Table 物件的指標 = NULL
+
+   			-	~Thread(); 				// 當 thread 被解構=刪掉，等同 Thread停止運行
+
+		(2)	基本 thread 操作
+			-	void Fork(VoidFunctionPtr func, void *arg); [New -> Ready]
+	            -	傳入參數
+				(1)	VoidFunctionPtr func 是一個指向「1個 傳入參數」的函數 = void (*funPtr)(void *arg)
+				(2)	void *arg 是一個指向未定型態的指標
+					可以透過 傳遞「打包好的Struct」來傳遞多個變數
+
+				-	主要功能:
+				(1)	call StackAllocate(..)
+					-	幫 Thread 配置 Kernel Stack空間 & 初始化 Stack空間(將 ThreadRoot位址 Push 到 Stack中)
+					-	指定將來要執行的函數(func) & 參數(arg)
+				(2)	將此Thread 排進 ReadyQueue
+
+				-	Note(!!!)
+				(1)	這個 Fork 僅用來配置/初始化 這個 Thread 的 Stack，並將其排入 ReadyQueue
+					表示 此Fork() 與 課本Fork()的不同之處在於「後者會自動產生 Child Thread；前者只是初始化 Stack」
+				(2)	在 NachOS 要 Create Child Threat 的流程
+					-	Thread* newThread = new Thread("New Thread");   // new 一個 Thread物件 = 有了 TCB(PCB)
+					-	newThread->Fork(ForkExecute,Arg);	// 配置 Kernel Stack空間、排入 Ready Queue)
+					-	ForkExecute() 執行後，會將 檔案 = User Program 載入到 記憶體中執行
+						-> AddrSpace::Load()、AddrSpace::Execute() -> InitRegisters()、RestoreState()、machine->Run()
+								
+			-	void Yield(); [Run -> Ready]
+				-    主要功能：暫停 currentThread(未結束) 送回 RQ，先讓其他 Thread 執行
+				-    是不可中斷的「原子操作(Atomic operation)」= 要先關中斷才能執行
+				(1)  關中斷，並儲存「原本的中斷狀態」
+				(2)  Pop ReadyQueue = nextThread
+				(3)  將 currentThread 排入 ReadyQueue
+				(4)  進行 Context Switch 切到 nextThread 執行
+				(5)  從 其他Thread 切回 currentThread 後，設定回「原本的中斷狀態」
+			
+			-	void Sleep(bool finishing); [Run -> Waiting(FALSE)、Terminate(TRUE)]
+				-    主要功能：自行設定 暫停/結束 currentThread，並從 RQ 取出 next Thread 執行
+				-    是不可中斷的「原子操作(Atomic operation)」= 要先關中斷才能執行
+				(1) 檢查中斷是否已關閉
+				(2) 將 currentThread 排入 Waiting Queue (設為 Blocked)
+				(3) Pop ReadyQueue = nextThread
+					- 進入 while(nextThread) 迴圈
+					- 若 Ready Queue 為空(nextThread=NULL)，則 等待interrupt (唯一會將 Thread放入ReadyQueue的手段)
+					- 若 Ready Queue 不為空，則 進行 Context Switch 切到 nextThread 執行
+						-	kernel->scheduler->FindNextToRun()
+						-	kernel->scheduler->Run(nextThread, finishing)
+
+				- Note:  當 Thread 在Blocked狀態 = Waiting Queue
+						最終會有其他 Thread 將 Waiting Queue 的 Thread 喚醒、放回 Ready Queue)
+
+		(3)	已經由 StackAllocate() 存在 TCB(PCB) 中，並在未來 由 ThreadRoot(..) 呼叫
+			-	void Begin();		// 等同 void ThreadBegin()
+				-	刪去 toBeDestroyed 指向的 Thread & 啟用 interrupt
+
+			-	void Finish();		// 等同 void ThreadFinish()
+				-	關閉 interrupt & 將此 Thread 設為 Sleep(TRUE)
+			
+		(4)	關於 Thread 狀態		
+			-	void CheckOverflow();   	// 檢查 thread stack 是否 overflowed
+			-	void setStatus(ThreadStatus st) { status = st; }
+			-	ThreadStatus getStatus() { return (status); }
+			-	char* getName() { return (name); }
+			-	int getID() { return (ID); }
+			-	void Print() { cout << name; }
+				以下會用到
+				-	void ThreadPrint(Thread *t) { t->Print(); }
+				-	Scheduler::Print() {readyList->Apply(ThreadPrint);}	 // 印出整個 ReadyQueue
+				-	List<T>::Apply(void (*func)(T)) const { 
+    					ListElement<T> *ptr;
+						for (ptr = first; ptr != NULL; ptr = ptr->next) {
+        					(*func)(ptr->item);
+    					}
+					}
+
+		(5)	void SelfTest();
+			-	測試 Thread 的實作 是否正常運作 = Create & Run Thread 的示範!!!
+			-	主要流程
+            (1)  new 一個 Thread 名為"forked thread" & ID = 1
+            (2)	幫 newThread 配置/初始化 Kernel Stack，並排入 ReadyQueue
+                 -   指定未來執行 func(..) = SimpleThread(1) & 傳入參數 1
+                 -   表示 newThread 會 印出 ID=1 並 切到其他 Thread執行，總共迴圈5次
+            (3)	Yield()：暫停 currentThread 切到 其他Thread 執行
+            (4)	SimpleThread(0)：印出 ID=0 並 切到其他 Thread執行，總共迴圈5次
+				-	SimpleThread(int which)：印出 指定ID=which(代表當前Thread) 並 切到其他 Thread執行，共執行5次
+
+  	3>	private 變數
+		(1)	int *stack; 	 	// 指向 Thread Kernel Stack 底部的指標
+			-	若為 main Thread 則 Kernel stack指標 指向 NULL，且不能 解構(刪除)
+				
+    	(2)	ThreadStatus status;	// ready, running or blocked
+    	(3)	char* name;				// Thread name for debug
+		(4)	int   ID;
+
+	4>	private 方法
+    	-	void StackAllocate(VoidFunctionPtr func, void *arg);	
+			-	由 fork()呼叫
+			-	用來配置 & 初始化 Thread 的 Kernel Stack
+            (1)	配置 Kernel Stack 空間 = StackSize * sizeof(int)
+				(StackSize 定義在 thread.h)
+            (2)	初始化 Kernel stack
+				包含 Push ThreadRoot(..)位址 & 將 Magic Num 存入 Stack 端點
+			(3)	初始化「剛建立 Thread」的「起始Reg值」
+                設定初始 TCB(PCB) 中 machineState[]的值
+                包含：ThreadRoot()、ThreadBegin()、func()、Arg、ThreadFinish()
+                當 Thread 在 Context Switch 後，將 machineState[] 所存 Reg值 載回 CPU Reg
+                此時 CPU 即可根據 Reg值 來執行 剛建立的 Thread
+
+    	-	int userRegisters[NumTotalRegs];
+
+		-	Note: 一個 執行 user program 的 Thread 會儲存「兩組 CPU register states」
+			-	會分別對應/使用 兩種 Stack
+		(1)	Thread 運行在 User Mode 時
+			-	會將「模擬CPU reg」存在 userRegisters[] 
+				( in scheduler.cc 的 Run() -> SaveUserState() )
+			-	使用 User stack (由 AddrSpace::Load() 配置)
+		(2)	Thread 運行在 kernel Mode 時
+			-	會將「Host CPU reg」存在 machineState[]
+				( in switch.S 的 SWITCH(..) )
+			-	使用 Kernel stack (由 Thread::StackAllocate() 配置)
+
+  	5>	public 方法 & 變數
+		(1)	在 User Mode 下暫存/回復「模擬CPU Reg值」
+			-	會在 Scheduler::Run() 中呼叫
+			-	void SaveUserState();		
+			-	void RestoreUserState();	
+
+    	(2)	AddrSpace *space;			// 指向 AddrSpace物件 = Page Table
+
+9.	class Scheduler
+	-	提供一個 ReadyQueue & toBeDestroyed指標指向下一個結束的Thread
+	-	主要功能：安排 thread 進 ReadyQueue、分配 CPU資源、刪去 thread ...etc
+	1>	public 方法
+		(1)	建構子 & 解構子
+			Scheduler();		// new 一個 ReadyQueue
+			~Scheduler();		// delete ready list
+
+		(2)	void ReadyToRun(Thread* thread);	
+			-	功能：將 thread 排入 ReadyQueue
+    		-	條件：kernel->interrupt->getLevel() == IntOff (禁止中斷時，才能做這件事)
+
+    	(3)	Thread* FindNextToRun();
+			-	功能：從 ReadyQueue 取出(Dequeue) 1st Thread，並回傳位址
+    		-	條件：kernel->interrupt->getLevel() == IntOff (禁止中斷時，才能做這件事)
+
+		(4)	void Run(Thread* nextThread, bool finishing);
+			-	主要功能
+				-	依照 參數finishing 決定 暫存/終結() oldThread
+				-	Context Switch：切換到 nextThread執行
+					(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+					(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+
+			-	工作流程
+				-	儲存 oldThread 模擬CPU reg 狀態 (in User Mode 存在 userRegisters[i])
+
+				-	Context Switch( 呼叫 SWITCH(oldThread, nextThread) in switch.S )
+					-	儲存 oldThread 目前所使用的 CPU Reg值
+					-	載入 nextThread 存在 TCB(PCB)的 Reg值 到「目前 CPU 的 Reg(s)」
+					-	回復 nextThread 之前的 PC值 給「目前的PC」= 切到 nextThread執行
+						(1)	若 nextThread 剛建立：PC 指向 ThreadRoot(..)
+							-	nextThread 依序執行 ThreadBegin() -> ForkExecute(..) -> ThreadFinish()
+							-	ForkExecute(..) 會執行 (0) 所述的工作
+						(2) 若 nextThread 執行到一半：PC 指向 之前的 t2 PC
+							-	會回到 nextThread 的 scheduler->Run(..) 執行[2]的「回復 模擬 Reg & Page Table」
+
+			-	若 oldThread 已經 finish -> Run() 至此結束
+			-	若 oldThread 尚未 finish，表示有其他 Thread 進行 Context switch 切回 oldThread
+				-> 會繼續執行 剩下的 Scheduler::Run(..)，包含 
+				-> CheckToBeDestroyed() & 回復 oldThread 模擬CPU reg 狀態 in User Mode
+
+		(5)	void CheckToBeDestroyed();
+			-	由 ThreadBegin() = Thread::Begin() & scheduler->Run() 呼叫
+			-	若 toBeDestroyed 有指向 Thread，則將其刪除
+
+		(6)	void Print();		// 印出整個 ReadyQueue
+								// 見 Thread::Print() 的筆記
+    
+  	2>	private 變數
+		(1)	List<Thread *> *readyList;  // ReadyQueue
+		(2)	Thread *toBeDestroyed;		// 指向 已結束的Thread
+			（當下一個 Thread 執行時，這個 Thread 會被刪去）
+
+10.	Thread 的 Context Switch 
+	0>	NachOS 的 Context Switch 有兩個階段
+		(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+		(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+		接下來 主要介紹(1)，因為(2) 在 Scheduler::Run() 已經介紹
+		其切換順序如下
+		-	儲存 模擬CPU Reg in Run()
+		-	儲存 Host CPU Reg in SWITCH()
+		-	回復 Host CPU Reg in SWITCH()
+		-	回復 模擬CPU Reg in Run()
+
+	1>	當 Thread Context Switch 時，會用到以下函數
+		-	其 宣告在 thread.h 並實作在 switch.h/switch.S
+		-	因其實作在 switch.S，故呼叫後，會直接跳至switch.S執行
+		-	採用組語的原因：Context Switch 與硬體高度相關(為了要快)，所以用組語寫
+	
+	2>	scheduler->Run(..) 呼叫 SWITCH(oldThread, nextThread) 的流程
+		(0)	組合語言的註記
+			-	src在左，dst在右
+			-	movl N(%reg1),%reg2 中
+	           	-	N(%reg1) 表示 指向「reg1所存的位址 + N」的位址
+	           	-	整個指令 表示 將 [reg1所存的位址 + N] 存入 reg2 中
+
+		(1)	當 Thread 呼叫 SWITCH(t1, t2) 時，翻譯成組語 如下
+			push Thread * t2	// 將 t2物件(TCB) 的位址 Push 到 Stack
+			push Thread * t1	// 將 t1物件(TCB) 的位址 Push 到 Stack
+			call SWITCH			// 這裡會 Push currentThread(t1)的PC = currentThread的下個指令位址(return address)
+								// 並且 Jmp to SWITCH
+			// 因為 call FUNC = Push PC + Jmp to FUNC
+
+		(2)	此時 t1的Stack 空間 如下
+			Stack 最底端 (高位址)
+			...
+			esp+8  ->		thread *t2 (t2物件(TCB) 的位址)
+			esp+4  ->		thread *t1 (t1物件(TCB) 的位址)
+			 esp   -> 		return address = currentThread(t1)的PC
+			... (沒有資料)
+			Stack 邊界(低位址) = stack = Magic Num(STACK_FENCEPOST)
+		
+		(3)	Jump 到 SWITCH:
+			SWITCH:
+			movl    %eax,_eax_save          # 暫存 currentThread(t1) 的 eax值 (到 _eax_save)
+
+			# 儲存 currentThread(t1) 的 CPU Reg state
+			movl    4(%esp),%eax            # 將 eax 指向 存在Heap中的 t1物件(TCB) 的位址(t1物件 存在heap中)
+											# 儲存 currentThread(t1) 的 Reg值 = Reg state
+											# 將 currentThread(t1) 的 Reg值 存於 eax+N 的位址 
+											# = t1物件(TCB) 的 &machineState[N/4-1])，可見 switch.h
+			movl    %ebx,_EBX(%eax)
+			movl    %ecx,_ECX(%eax)
+			movl    %edx,_EDX(%eax)
+			movl    %esi,_ESI(%eax)
+			movl    %edi,_EDI(%eax)
+			movl    %ebp,_EBP(%eax)
+			movl    %esp,_ESP(%eax)         # 將 currentThread(t1) 的 esp值 存入 _ESP(%eax)
+											# _ESP(%eax) = eax+0 指向的位址 = t1物件(TCB)的 stackTop
+			movl    _eax_save,%ebx          # 將先前暫存的 原eax值(t1的eax) 也存入 t1物件(TCB)的 machineState[_EAX/4-1])
+			movl    %ebx,_EAX(%eax)         
+
+			movl    0(%esp),%ebx            # 將 t1的esp指向位址的資料 存入 t1物件(TCB)的 machineState[_PC/4-1])
+			movl    %ebx,_PC(%eax) 			# 其中 t1的esp 目前指向 return address = currentThread(t1)的PC
+											# (= call switch.. 的下一行)
+
+			# 回復 nextThread(t2) 的 CPU Reg state
+
+			movl    8(%esp),%eax            # 將 eax 指向 存在Heap中的 t2物件(TCB) 的位址(t2物件 存在heap中)
+
+			movl    _EAX(%eax),%ebx         # 暫存 nextThread(t2) 的 eax值 (到 _eax_save)
+			movl    %ebx,_eax_save          
+											# 將 t2物件(TCB) 中儲存的 Reg值 載入 CPU Reg(s)
+											# (in machineState[N]，可用 eax+N 來存取陣列元素)
+			movl    _EBX(%eax),%ebx         
+			movl    _ECX(%eax),%ecx
+			movl    _EDX(%eax),%edx
+			movl    _ESI(%eax),%esi
+			movl    _EDI(%eax),%edi
+			movl    _EBP(%eax),%ebp
+			movl    _ESP(%eax),%esp         # 將存在 eax+0 位址上的資料(t2的stackTop/ESP) 存入「目前的esp」中
+											# (1)	若 t2 剛被建立
+											#		stackTop/ESP 存放 ThreadRoot的位址
+											# (2)	若 t2 執行到一半
+											#		stackTop/ESP 存放 先前ESP 的值
+											#		=	指向 存放 return Address 的位址
+											#		=	指向 存放 之前的 t2 PC
+										
+			movl    _PC(%eax),%eax          # 將 t2物件儲存的PC值 存在 esp+4 指向的位址
+			movl    %eax,4(%esp)            
+			movl    _eax_save,%eax			# 將 nextThread(t2) 的 原eax值 載回「目前eax中」
+
+			ret								# Pop esp指向的資料 到 PC + Jmp to PC
+											# (1) 若t2剛建立：esp指向的資料 = ThreadRoot的位址 -> PC 指向 ThreadRoot Label
+											# (2) 若t2執行到一半：esp指向的資料 = 先前ESP的值 = 之前的 t2 PC -> PC 指向 之前的 t2 PC
+		(4)	Jump 到 ThreadRoot:
+			ThreadRoot:
+			pushl   %ebp			# 將 ebp Push 到 esp指向的 stack = nextThread(t2) 的 stack
+			movl    %esp,%ebp		# 令 ebp = esp，兩者都指向 Stack 堆疊最上方
+			pushl   InitialArg		# Push InitialArg = EDX = 傳遞進 nextThread(t2) 的參數
+			call    *StartupPC		# Push 現在的PC = 下個指令(call *InitialPC) + Jmp to *StartupPC = ThreadBegin()
+									# Begin()的作用：刪去 toBeDestroyed 指向的 Thread & 啟用 interrupt
+			call    *InitialPC		# Push 現在的PC = 下個指令(call *WhenDonePC) + Jmp to *InitialPC = 傳入的func()
+									# func() = nextThread(t2) 的主要內容
+									# 此時，可以透過 ESP+4 取用 InitialArg 或 再次 Ｃontext Switch 到其他 Thread
+			call    *WhenDonePC		# Push 現在的PC = 下個指令(不重要，因為 Not reached) + Jmp to *WhenDonePC = ThreadFinish()
+									# Finish()的作用：關閉 interrupt & 將此 Thread 設為 Sleep
+
+			# NOT REACHED
+			movl    %ebp,%esp
+			popl    %ebp
+			ret
+
+	3>	統整 2個主要函數
+		(1)	SWITCH(oldThread, nextThread)
+			-	將 oldThread 目前所使用的 CPU Reg(s) 暫存至 oldThread之TCB(PCB) 中
+			-	將 nextThread 暫存在 nextThread之TCB(PCB)的 Reg(s)值 載入「目前 Host CPU 的 Reg(s)」
+			-	回復 nextThread 之前的 PC值 給「目前的Host PC」
+				(1)	若 nextThread 剛建立：Host PC 指向 ThreadRoot(..)
+				(2) 若 nextThread 執行到一半：Host PC 指向 之前的 t2 PC
+
+		(2) ThreadRoot(InitialPC, InitialArg, WhenDonePC, StartupPC)
+			-	所有 Thread 剛建立時的入口
+	        -	主要功能
+	           	-	傳遞初始參數(InitialArg)
+           		-	依序呼叫 ThreadBegin() -> func(Arg) -> ThreadFinish()
+           		-	其中 func() = nextThread(t2) 的主要內容
+           		-	此時，可再次 Ｃontext Switch 到其他 Thread
+
+11.	Kernel::ExecAll() & int Kernel::Exec(char* name)
+	1>	void Kernel::ExecAll()
+		-	由 main.cc 呼叫
+		-	依序對 所有待執行(讀入)的 檔案=Program 建立各自的 TCB(PCB) & Page Table
+			for (int i=1;i<=execfileNum;i++) {
+				int a = Exec(execfile[i]);
+			}
+			(最多建立 10個TCB，因為一個 Kernel物件中，只宣告 Thread* t[10])
+		-	之後 將 main函式 所在 Thread = mainThread Finish掉
+			= 切到 其他在ReadyQueue的 Thread
+	
+	2>	int Kernel::Exec(char* name)
+		-	由  Kernel::ExecAll() 呼叫
+		-	主要功能：Create 一個 TCB(PCB) & Page Table，並回傳 其ID
+		(1)  new 一個 Thread Control Block(TCB/PCB) = Thread物件
+		(2)  new 一個 Page Table = AddrSpace物件
+		(3)  配置 & 初始化 new Thread，並將其 排入 ReadyQueue
+			 (包含 未來要執行 ForkExecute(..) & 傳入參數 = new Thread位址 )
+		(4)  回傳 new Thread ID
+
+	3>	void ForkExecute(Thread *t) 
+		-	定義在 kernel.cc
+		- 主要功能：將 Thread(t) 對應的 Program 載入記憶體 & 配置 Page Table & 請 machine 開始執行指令
+		(1)  將 名稱為 t->getName() 的 noff檔案 = Program = Thread要執行的程式 打開
+		(2)  將 noff檔案(Program) 各個 Segment 的內容 Load 到實體記憶體中
+		(3)  若 檔案開啟失敗 return
+		(4)  若 檔案開啟成功，則 AddrSpace::Execute()
+				配置 Page Table & 將其位址 載入machine，並請 machine 開始執行指令
+
+# 有時間要補回 class interrupt (看來是沒時間...)
+
+
+===============================================================
+Part 2 Implement page table in NachOS
+===============================================================
+
+Working item:
+-	Modify its memory management code to make NachOS support multi-programming.
+
+Verification:
+-	執行 
+	cd NachOS-4.0_MP2/code/test  ../build.linux/nachos -e consoleIO_test1 -e consoleIO_test2
+-	Wrong results without multi-programming
+-	Correct results with multi-programming
+	9
+	8
+	7
+	6
+	lreturn value:0
+	15
+	16
+	17
+	18
+	19
+	return value:0
+
+Note:
+-	Be careful that program size might exceed a PageSize
+-	You must put the data structure recording used physical memory in kernel.h / kernel.cc
+-	You must set up “valid, readOnly, use, and dirty” field for your page table,
+	which is defined under “translate.h TranslationEntry class”
+
+-	The size of your page table must be able to contain the whole physical memory
+
+Hint:
+-	The following files “may” be modified…
+	-	userprog/addrspace.*
+	-	threads/kernel.*
+
+[A] NachOS 初始不採用 Paging 的情況
+1.	背景：
+	-	NachOS 在 bool AddrSpace::Load(char *fileName) 會將 User Program File 載入實體記憶體
+	-	原本這裡直接將 Program資料 寫入 實體記憶體 ( kernel->machine->mainMemory[virtualAddr] )
+	-	等同 PageTable 直接將 Virtual Memory 當成 Physical Memory
+	-	不採用 Paging 的概念，直接將 整個 Physical Memory 視為 Program 專屬的 Virtual Memory
+		只是把 各個Section 按照 虛擬位址 連續存在實體記憶體中
+
+2.	造成的問題
+	-	所有 Thread 的 Code seg、Data Seg、Stack 皆共用同一段 實體記憶體空間
+	-	因為 所有 Thread 都是從 虛擬位址=0 開始執行程式碼
+		若虛擬位址0=實體位址0，那後面載入的 Program Code 都會覆蓋掉 前面載入的 Program Code
+
+[B] 解法：實作 Paging，不同 Thread 佔用不同 Frame
+1.	原理
+	1>		紀錄 已使用的 Frame，以確保 分配 Frame 給 Thread 時，不會重複 分配
+			-	採用 AV-List = Free Frame List 紀錄 Free Frame
+			-	僅分配 Free Frame 給 Thread
+				-> 保證不同 Thread 分配到不同 Frame，彼此可獨立運作、存取其內的資料
+
+	2>		維護 Page Table
+			-	NachOS 預設會為每個 Thread 配置 128個 Page 的 Page Table
+				-	但每個 Program 所需大小不同
+				-	防止 Thread 自己讀寫到 Code Seg 區域的 Page
+			-	透過設定 Valid Bit & ReadOnly Bit 來設定 該 Entry 是否已分配 Frame 且 存取權限為何
+				-	Code Seg Page：Valid & ReadOnly
+				-	Data Seg & Stack Page：Valid & Not-ReadOnly
+				-	剩下空閒的 Page Entry：Invalid
+
+2.	運作流程
+	1>		初始化 Page Table：所有 Entry 設為 Invalid
+	2>		Program 載入 Memory
+			-	量測 Program 大小，決定 Page 數量，並 Pop 相同的 Free Frame 分配給 Thread
+			-	將分配結果 Page Num - Frame Num 更新在 Page Table，並更新 Valid Bit
+	3>		Thread Finish (永久結束 & 刪去)
+			-	根據 Page Table 佔用的 Frame，一個一個 Push 回 AV-List
+
+3.	實作結果
+	1>		實作 AV-List
+			-	修改 Class Kernel：新增 維護 AV-List = Free Frame List 的 List屬性 & 方法
+			-	變數：List<int> *avList;      // 透過一個 AV-List 來儲存 所有的 Free Frame
+			-	方法
+				-	int PopFreeFrame();  // Pop Free Frame from AVList
+				-	int PushFreeFrame();  // Pop Free Frame from AVList
+			-	建立/初始化 avList in Initialize()
+	2>		初始化 Page Table
+			-	修改建構子 AddrSpace::AddrSpace()：此處是關於 Page Table 的初始化
+			-	修改前：pageTable[i].physicalPage = i;
+				（ 等同 PageTable 直接將 Virtual Memory 映射為 Physical Memory ）
+			-	修改後：pageTable[i].physicalPage = 0;
+				（ 等待未來 配置正確的 Frame Number ）
+	3>		分配 Free Frame
+			-	修改 bool AddrSpace::Load(char *fileName)
+	4>		回收 Free Frame
+			-	修改 void Scheduler::CheckToBeDestroyed()
+				-	加入一行：if(toBeDestroyed->space) toBeDestroyed->space->~AddrSpace();
+			-	修改 AddrSpace::~AddrSpace()
+
+Report:
+-	Explain your implementation
+
+(以下問題應該是實作完再回答!!!!!)
+-	Explain how NachOS creates a thread(process),
+	load it into memory and place it into scheduling queue
+	-	How Nachos allocates the memory space for new thread(process)?
+	-	How Nachos initializes the memory content of a thread(process),
+		including loading the user binary code in the memory?
+		-	Kernel Mode
+			(1) 配置 Kernel Stack & 初始化 Stack & TCB 中的資料
+				-	int Kernel::Exec(char* name) 呼叫 fork()
+				-	fork() 呼叫 StackAllocate(func, arg)
+				-	StackAllocate(func, arg)：配置 Kernel Stack 的地方 
+					Kernel Stack大小 = StackSize * sizeof(int)
+					(StackSize 定義在 thread.h)
+				-	設定 stackTop = ThreadRoot & stack = Magic Number
+				-	設定 TCB 中的 Reg值 = machineState[N] = 對應函數位址
+		-	User Mode				
+			(2)	載入檔案
+				-	初始化 Page Table：AddrSpace::AddrSpace()
+				-	ForkExecute(..) 呼叫 AddrSpace::Load(char *fileName) 
+					-	讀入 noff Header，並根據 Header的資料 得知 各個Segment的大小與資料內容
+					-	根據 Program 所需的 size = Code + Data + BSS + UserStackSize 來決定 Pages 的數量
+					-	將 檔案中 各個 Segment 的資料 存入主記憶體
+						分配 Free Frame 給 Thread 的各個 Page，包含 配置 User Stack
+				-	AddrSpace::Execute(char* fileName) 
+					-	指派 Page Table
+					-	初始化 模擬CPU Reg：AddrSpace::InitRegisters()
+					-	執行 User Program：Machine::Run()
+
+	-	How Nachos creates and manages the page table?
+		NachOS 如何建立、管理 Page table
+		-	建立
+			-	int Kernel::Exec(char* name) 中 t[threadNum]->space = new AddrSpace();
+		-	管理
+			-	ForkExecute(..)
+				-	Load(char *fileName)：決定 Page 數量 & 配置各個 Seg之Pages 對應的 Frame & 權限
+				-	Execute(char *fileName)：指派 Page Table 給 Thread
+			-	Scheduler::Run()
+				-	void SaveState();			// 在 Context switch時，儲存 Thread 的 Page Table的位址/資訊
+   				-	void RestoreState();		// 在 Context switch時，回復 Thread 的 Page Table的位址/資訊
+
+	-	How Nachos translates address? (如何翻譯位址)
+		-	ExceptionType AddrSpace::AddrTranslate(vaddr, *paddr, mode)
+			-	實作 1種翻譯方案的地方(Page Table)
+			-	目前還沒找到誰會呼叫它
+
+		-	ExceptionType Machine::Translate(int virtAddr, int* physAddr, int size, bool writing)
+			-	實作 2種翻譯方案的地方(Page Table 或 TLB)
+			-	每次使用 WriteMem(..) & ReadMem(..) 都會呼叫到
+				其中 WriteMem(..) & ReadMem(..) 用於 Machine::OneInstruction() 內部
+				目前「使用中」的 翻譯位址實作
+
+	-	How Nachos initializes the machine status (registers, etc)
+		before running a thread(process)
+		NachOS 如何初始化 硬體狀態？
+		-	StackAllocate(func, arg)
+			-	配置/建立 Kernel stack & 設定「new Thread」的「起始Host Reg值」
+		-	Scheduler::Run() = Context Switch
+			-	切換 模擬CPU Reg
+				-	回復 存在 TCB 的 CPU Reg值 for 模擬CPU
+			-	切換 Host CPU Reg
+				-	SWITCH(oldThread, nextThread) in switch.S
+				-	回復 存在 TCB 的 CPU Reg值 for Host CPU
+		-	ForkExecute(..)		
+			-	AddrSpace::Load(char *fileName)
+				-	Program 載入記憶體
+			-	AddrSpace::Execute(char *fileName)
+				-	指派 Page Table & 將其位址 載入machine
+				-	設定 Regs、PC 的初始值(PC=0) for 模擬CPU
+
+	-	Which object in Nachos acts the role of process control block(PCB)
+		NachOS 中的 PCB 是哪個 Object?
+		-	Thread Object
+
+	-	When and how does a thread get added into the ReadyToRun queue of
+		Nachos CPU scheduler?
+		Thread 何時會被加入 CPU 排班程式的 Ready Queue 
+		-	int Kernel::Exec(char* name)
+		-	Thread::Fork(func, arg) = StackAllocate(func, arg) + Thread 排入 ReadyQueue
+
+
+Instruction
+1.	Copy your code for MP1 to a new folder
+	cp -r NachOS-4.0_MP1 NachOS-4.0_MP2
+
+2.	Copy test file
+	cp /home/os2019/share/consoleIO_test* NachOS-4.0_MP2/code/test/
+
+3.	Test your program  cd NachOS-4.0_MP2/code/test  ../build.linux/nachos -e consoleIO_test1 -e consoleIO_test2
+
+#Additional Note for vscode
+-	How to open multiple Windows for the same Working directory?
+	1.	Ctrl/Cmd + Shift + P to bring up the command palette
+	2.	Search for "Workspaces: Duplicate Workspace In New Window"

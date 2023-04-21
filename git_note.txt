@@ -1,0 +1,154 @@
+#Using Github on Mac
+
+0.	git & github
+	1>	git
+		-	是一個管理「檔案版本」的程式
+		-	提供 存檔功能(快照+回復) + 共同開發
+
+	2>	git 工作區域
+		(0)	git 資料夾
+			只是用一個資料夾 把「所有的專案程式」都放在裡面
+
+		(1) git repo = 本地端檔案庫 (Local Respository) = 1 Project
+			存放 1個專案程式 的 所有存檔/快照 & 相關資料的「資料夾」
+
+		(2)	工作區(Working Directory)
+			從 Git 專案(資料夾)中，複製一份「某一個版本的程式碼」存於硬碟 供User修改
+
+		(3)	暫存區(Staging Area)
+			-	又稱「Git 索引」負責「追蹤」所有加入此區的檔案狀態
+			-	若檔案 被Git 追蹤 = 檔案的任何變化 都會被 Git知道，並提示User
+
+	3>	github 是一個雲端儲存 Respository 的服務
+		= 建立 遠端檔案庫(Remote Respository)
+
+1.	git 基本使用流程
+	1>	Install homebrew & Install git
+		-	$	/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+		-	$	brew install git
+
+		-	檢查 git 版本
+			$	git --version
+
+	2>	建立 一個專案資料夾，並「初始化」成 Local git repo
+		-	$ cd /User/.../git-repos
+			（假設 git-repos 是統一存放 各種專案(repo) 的資料夾)
+
+		-	$ git init		// 初始化 資料夾，此時會生成一個隱藏資料夾(.git)
+		-	$ git status	// 觀看目前資料夾中的檔案狀態
+			(1)	僅會顯示「尚未存檔(commit) 到 git repo 之檔案」的狀態
+			(2)	常見狀態1: 若出現 modified: ... 表示所列檔案「已被修改 但尚未存檔」
+			(3)	常見狀態2: 若出現 Untracked files: ... 表示所列檔案「尚未被Git 追蹤」
+
+	3>	在 工作區 中「新增、修改」檔案
+	4>	將「新檔案/修改檔案」指派給 Git追蹤 = 加入暫存區
+		-	$ git add .			// 將目前資料夾下所有檔案 加入暫存區(注意add & . 中間是空格)
+		-	$ git add hello.md	// 將目前資料夾下的檔案hello.md 加入暫存區
+		-	此後，該檔案 就會被 Git 所追蹤 = 不會出現在 Untracked files: ... 中
+
+	5>	將在 加入暫存區的所有檔案「存檔」= Commit(提交) 到 本地端檔案庫(Local git repo)
+		-	$ git commit -m "git init"	// 將暫存區的檔案進行 commit，-m 後面為 commit 的訊息
+		-	$ git commit --amend -m "git init again"	// 修改最後一次 commit 的訊息
+		-	$ git commit --amend --no-edit				// 將暫存區的檔案併入最後一次 commi
+		
+		-	$ git status	// 觀看目前資料夾「尚未存檔(commit) 到 git repo 的檔案」
+			-	現在顯示的結果 應不包含「已存檔」的檔案
+
+	6>	查詢所有 commit 紀錄
+		-	$ git log					// 查詢所有 commit 紀錄
+		-	$ git log --oneline --graph	// 參數 --oneline 顯示更精簡的 commit 紀錄
+										// 參數 --graph 顯示 commit 線圖
+		-	$ git log --all				// 參數 --all 顯示包含 branch 的紀錄
+
+
+
+2.	git -> github 基本使用流程
+	0>	Create github account
+    1>  設定 SSH Key for Github
+        (1) 建立儲存 金鑰 的資料夾(macOS 預設就有)
+            -   $ mkdir ~/.ssh 
+            -   $ chmod 700 ~/.ssh
+        (2) 產生新的金鑰
+            -   使用 ssh-keygen 這個指令產生金鑰，採用rsa算法 & 指定金鑰長度為 4096
+                $ ssh-keygen -t rsa -b 4096 -C "your_email@example.com"
+                （使用電子郵件作為標籤)
+        (3) 產生金鑰，會問 3 個問題
+            -   Enter file in which to save the key
+                可以在此更改 金鑰的檔名
+            -   Enter passphrase (empty for no passphrase)
+                是否設定金鑰密碼，若有設定，之後每次使用需輸入密碼(忘記就居居)
+        (4) 完成設定 看到 fingerprint 與 randomart ，表示成功
+            XX.pub 為公鑰 / XX 為私鑰
+
+        (5) 檢視生成的公鑰
+            $ cat ~/.ssh/公鑰名稱.pub 
+
+        (6) Login GitHub ，點選你的頭像 -> Settings
+            -> SSH and GPG keys -> New SSH key (貼上複製的公鑰)
+
+        (#) 若在(3)更改金鑰黨名，還需要 在 ./ssh 中 新增 config 檔案
+            -   並在其內加入內容
+                Host github.com
+                HostName github.com
+                User 使用者名稱
+                IdentityFile ~/.ssh/金鑰名稱
+
+	2>	Github: New Remote respository (Set Repo Name、Public/Private)
+
+	3>	在 Local repo 中建立一個「遠端檔案庫(Remote repo)主機」名叫 origin
+		-	$ git remote add origin git@github.com:username/reponame.git
+			其中 origin 是 預設 遠端主機連結 的名稱
+        -   修改 遠端檔案庫(Remote repo) 的網址
+            $ git remote set-url origin [url]
+		
+	4>	查詢 Local repo 中的 遠端主機
+		-	$ git remote
+		-	修改 預設 遠端主機 名稱
+			-	$ git remote rename 原本名稱 修改名稱
+
+	5>	將 Local repo 送到 遠端主機
+		= 將 Local repo 推送到 名叫 origin 的遠端主機，且為主要版本(Master branch)
+		-	$ git push -u origin master
+			其中 "-u" 會把「目的地=origin & 分支=master」設為「預設」
+			下次只需要 $ git push 會有相同效果
+        
+
+
+3.	github -> git clone 基本使用流程
+	1>	複製整個 Remote repo 到 資料夾(git-repos)之下
+		-	$ cd /User/.../git-repos
+		-	$ git clone https://github.com/yourgithub/reponame.git
+	2>	加入暫存區 & 存檔
+		-	$ git add .
+		-	$ git commit -m "git init"
+	3>	將 本地檔案庫 送到 遠端檔案庫
+		-	$ git push
+
+	( 從 遠端檔案庫 同步檔案到 本地檔案庫 $ git fetch )
+
+4.	git 的三種檔案狀態
+	(1)	已提交（committed）= 已存檔在 Local repo
+	(2) 已修改（modified）
+        -   紅字：已修改，尚未加入暫存區、尚未存檔
+        -   綠字：已修改，已經加入暫存區，但尚未存檔
+	(3) 已預存（staged）= 已在暫存區(索引)中，準備好下次提交(存檔)
+		-	unstaged：若想將檔案 從 暫存區中移出，以便下次 不進行存檔
+			$ git reset -- 檔案名稱
+		-	若希望檔案 回上到一個存檔 
+
+5.	Git 其他指令
+	(1)	unstaged：若想將檔案 從 暫存區中移出，以便下次 不進行存檔
+		$ git reset -- 檔案名稱
+	(2)	若希望某個檔案 回上到一個存檔 
+		$ git reset -- 檔案名稱
+		$ git checkout -- 檔案名稱
+
+	(3)	若希望 repo 回到上一個存檔
+		$ git reset --soft HEAD~1
+		（其中 ~數字 代表要回上 上幾個版本的存檔）
+
+
+6.	Branch
+    1>  Conflict
+
+    230125

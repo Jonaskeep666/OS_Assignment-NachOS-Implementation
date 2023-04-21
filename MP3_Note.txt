@@ -1,0 +1,1239 @@
+===============================================================
+Part 1 Trace code
+===============================================================
+
+# Contents
+[A] New → Ready
+1.	New → Ready → Running 的流程
+2.	[Rw] class Kernel 主要使用 Kernel::ExecAll()、Kernel::Exec(char*)
+3.	[Rw] class Thread 主要使用 Thread::Fork()、Thread::StackAllocate()
+4.	[Rw] class Scheduler
+
+[B]	Running → Ready
+5.	[Rw] class Machine 主要使用 Machine::Run()
+6.	模擬硬體 的 class架構
+7.	class Interrupt (in machine/)
+8.	Running → Ready 的流程
+
+[C]	Running → Waiting
+9.	class Semaphore
+10.	class Lock
+11.	Running → Waiting → Ready → Running 的流程
+	硬體的 上鎖 & 解鎖流程 (以 SynchConsoleOutput 為例)
+
+[D]	Waiting → Ready
+
+[E]	Running → Terminated
+12.	Running → Terminated 的流程
+
+[F]	Ready→Running
+
+##	Recall MP2：NachOS 的 main.cc 執行 User program
+	1>	main.cc = NachOS 主程式
+		-	根據 cmd 傳入參數，設定 初始狀態
+		-	kernel->ExecAll(); = 執行 User program
+
+	2>	mainThread 執行 Kernel::ExecAll()
+		(1)	依序對 所有待執行(讀入)的 檔案=Program 建立各自的 TCB(PCB) & Page Table
+			主要呼叫 int Kernel::Exec(char* name)
+			-	Create 一個 TCB(PCB) & Page Table，並回傳 其ID
+			-	配置 & 初始化 new Thread，並「排入 ReadyQueue」
+
+		(2)	將 mainThread Finish() 掉
+
+	3>	此時，mainThread 進入結束程序，並 Pop out ReadyQueue 中的 nextThread 執行
+		(1)	Thread::Sleep (bool finishing)
+			-	自行設定 暫停/結束 currentThread(Block) 
+				& 切到其他 Thread 執行 = 呼叫kernel->scheduler->Run(nextThread, finishing)
+			-	若 ReadyQueue 為空，則 Idle 並等待下一個 Interrupt 將 Thread 放進 ReadyQueue 
+			-	是不可中斷的「原子操作(Atomic operation)」
+
+		(2)	Scheduler::Run(nextThread, finishing)
+			-	依照 參數finishing 決定 暫存/終結() oldThread
+			-	Context Switch：切換到 nextThread執行
+				(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+				(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+
+	4>	SWITCH(oldThread, nextThread) in switch.S
+		-	將 oldThread 目前所使用的 Host CPU Reg(s) 暫存至 oldThread之TCB(PCB) 中
+		-	將 nextThread 暫存在 nextThread之TCB(PCB)的 Reg(s)值 載入「目前 Host CPU 的 Reg(s)」
+		-	回復 nextThread 之前的 PC值 給「目前的Host PC」
+			(1)	若 nextThread 剛建立：Host PC 指向 ThreadRoot(..)
+			(2) 若 nextThread 執行到一半：Host PC 指向 之前的 t2 PC
+
+	5>	ThreadRoot(InitialPC, InitialArg, WhenDonePC, StartupPC) in switch.S
+		-	依序呼叫 ThreadBegin() -> func(Arg) -> ThreadFinish()
+		(1)	ThreadBegin() = Thread::Begin()
+			-	刪去 toBeDestroyed 指向的 Thread(此處為 mainThread) & 啟用 interrupt
+
+		(2)	func(Arg) = ForkExecute(..) = ForkExecute(Thread *t)
+			-	將 Thread(t)物件 對應的 Program 載入記憶體 & 配置 Page Table & 請 machine 開始執行指令
+			-	AddrSpace::Load(char *fileName)
+				-	將 User program (noff檔案=fileName) 的各個 Segment內容 載入到 (模擬的)實體記憶體中
+				-	此處會分配 Free Frame 給 Thread 的 Page Table，並配置好 User Stack
+			-	AddrSpace::Execute(char *fileName)
+				-	指派 Page Table & 將其位址 載入machine，並請 machine 開始執行指令
+				-	kernel->currentThread->space = this;
+					(this = AddrSpace物件 = Page Table 先前 已在 Kernel::Exec(char* name) 創建)
+				-	this->InitRegisters(); & this->RestoreState();
+					-	設定 Regs、PC 的初始值(PC=0) & 載入 Thread Page Table的位址 到 machine
+			-	kernel->machine->Run() -> 6>
+
+	6>	Machine::Run() in mipssim.cc
+		-	CPU 開始「真正」執行 User Program File 的指令
+			(由 ForkExecute(..) -> AddrSpace::Execute(..) -> Machine::Run() )
+		-	主要流程：設為 UserMode、呼叫 OneInstruction(instr)、前進 1 Tick = OneTick()
+
+		-	Machine::OneInstruction(Instruction *instr)
+			-	從 (模擬)PC 指向的資料，取出/執行一道指令
+			-	若是 new Thread，(模擬)PC 會從「虛擬記憶體」第0筆指令 開始讀取
+				(因為在 AddrSpace::Execute() 中 this->InitRegisters() 已經將 PC 設成0)
+				(在讀取的過程中 Machine::ReadMem(..) & Machine::WriteMem(..) 會呼叫 Machine::Translate() 翻譯成實體位址)
+
+[A]	New → Ready
+
+##	Trace 路徑
+	-	Kernel::ExecAll() -> Kernel::Exec(char*)  
+	-	Thread::Fork(VoidFunctionPtr,void*)  
+	-	Thread::StackAllocate(VoidFunctionPtr,void*)  
+	-	Scheduler::ReadyToRun(Thread*)
+
+1.	New → Ready → Running 的流程
+	(0)	當 main.cc 完成初始化工作，則
+		-	呼叫 Kernel::ExecAll()
+		-	依序呼叫 Exec(char*)
+
+	(1)	Exec(char*) 
+		-	對 所有待執行的檔案 = User Program 建立 TCB / Page Table
+			= 呼叫 t[threadNum]->Fork((VoidFunctionPtr) &ForkExecute, (void *)t[threadNum]);
+
+		-	Thread::Fork(..)
+			-	Thread::StackAllocate(..)
+				主要會幫 Thread 配置 Stack空間 & 初始化 Stack空間
+				(將 ThreadRoot位址 Push 到 Stack中，在 Context Switch 時使用) 
+			-	Scheduler::ReadyToRun(..)
+				將 thread 排入 ReadyQueue
+
+	(2)	回到 Kernel::ExecAll() 呼叫 currentThread->Finish()
+		-	結束自己 = main 並切到 其他 Thread 執行
+		-	currentThread->Finish() -> currentThread->Sleep() ->  kernel->scheduler->Run() = Context Swtich
+
+	(3) 當 有人呼叫 scheduler->Run() 切到 new Thread 執行時
+		-	PC會被初始化，指向 ThreadRoot(..)
+		-	ThreadRoot(..) 會依序呼叫 Begin()、func()=ForkExecute(..)、Finish()
+
+	(4) 當 new Thread 開始執行 ForkExecute(..) in Kernel.cc
+		-	呼叫 AddrSpace::Load()
+			-	會將 對應 User Program (檔案 )載入記憶體(Paging的實作) & 分配 Page Table 
+		-	呼叫 AddrSpace::Execute() 做3件事情
+			-	InitRegisters()
+			-	RestoreState()
+			-	machine->Run()：並請 machine 開始執行 User Program 指令 = 提取 PC指向的指令 & 執行
+
+2.	[Rw] class Kernel 主要使用 Kernel::ExecAll()、Kernel::Exec(char*) 
+	-	建立的 Kernel 物件 = Global 變數
+
+	1>	建構子 kernel(..)
+		-	建立 kernel 物件
+		-	根據命令列參數，設定初始化旗標
+			注意：此處可以「新增 命令列參數、指令」-> MP3的其中一個實作所在
+			ex.	新增 "-ep" 來初始化 Process 的優先權
+				else if (strcmp(argv[i], "-ep") == 0) { ... }
+
+	2>	Execution/Thread 相關函數
+		-	ExecAll()
+			-	依序對 所有待執行的檔案 = User Program 建立 TCB / Page Table (依序呼叫 Exec(execfile[i]) )
+			-	初始化所有 TCB & PageTable 後
+				關閉 Interrupt & 將此 Thread 設為 Sleep(TRUE) = 結束 Thread 並切到其他 Thread 執行
+				( currentThread->Finish() -> currentThread->Sleep() ->  kernel->scheduler->Run() = Context Swtich)
+
+		-	int Exec(char* name) // 重要！！
+			- 主要功能：Create 一個 TCB(PCB) & Page Table，並回傳 其ID
+            (1)  new 一個 TCB(PCB) = Thread物件
+            (2)  new 一個 Page Table = AddrSpace物件
+            (3)  配置 & 初始化 new Thread，並將其 排入 ReadyQueue
+				 ( 呼叫 thread->fork(..) )
+                 ( 包含 未來要執行 ForkExecute(..) & 傳入參數 = new Thread位址 )
+            (4)  回傳 new Thread ID
+
+		-	void ForkExecute(Thread *t)
+			- 主要功能：將 Thread(t) 對應的 Program 載入記憶體 & 配置 Page Table & 請 machine 開始執行指令
+				-	AddrSpace::Load(char *fileName)
+				(1)  將 名稱為 t->getName() 的 noff檔案 = Program = Thread要執行的程式 打開
+				(2)  將 noff檔案(Program) 各個 Segment 的內容 Load 到實體記憶體中(Paging)
+				(3)  若 檔案開啟失敗 return
+            	(4)  若 檔案開啟成功，則
+				-	呼叫 AddrSpace::Execute(char* fileName)
+                 	配置 Page Table & 將其位址 載入machine，並請 machine 開始執行指令
+					(InitRegisters()、RestoreState()、machine->Run())
+
+	3>	重要的成員變數
+		-	Thread *currentThread;	//	正在使用CPU之Thread 的 TCB
+    	-	Scheduler *scheduler;	//	Ready Queue
+
+		-	Thread* t[10]; 			//	指向 Thread 的指標陣列(共可指向 10條 Thread)
+		-	char*   execfile[10];	//	指向 開啟檔案名稱 的指標陣列(共可指向 10個 File)
+		-	int execfileNum;		//	開啟檔案 數量
+		-	int threadNum;			//	開啟Threads 數量
+
+3.	[Rw] class Thread 主要使用 Thread::Fork()、Thread::StackAllocate()
+	-	建立的 Thread 物件 = Thread Control Block = 儲存 Thread 所需的資訊
+
+	-	所有的 Thread 都有
+		(1)	stack/stackTop	// Kernel Stack (Host Mem) 空間的 起點 & 終點，兩者撐開整個空間
+			-	stack 指向低位址
+			-	stackTop 指向高位址
+			-	注意!!!! Stack 從 高位址往下長
+		(2)	machineState	// Context Switch 時 儲存 Host CPU registers的空間
+		(3)	status			// Thread 狀態(running/ready/blocked)
+
+	1>	每個 TCB 必須儲存的資訊
+		-	MP3 將會在此 儲存 Global Priority、Tn(前次猜測值)、T(本次實際值)
+
+		-	private 變數
+		(1)	int *stackTop;			 				// 指向 Thread Kernel Stack 頂部的指標
+    	(2)	void *machineState[MachineStateSize]; 	// 儲存所有的 Host CPU Register (最多75個 Reg)
+		(3)	int *stack; 	 		// 指向 Thread Kernel Stack 底部的指標
+			-	若為 main Thread 則 Kernel stack指標 指向 NULL，且不能 解構(刪除)
+				
+    	(4)	ThreadStatus status;	// ready, running or blocked
+    	(5)	char* name;				// Thread name for debug
+		(6)	int   ID;
+		(7)	 int userRegisters[NumTotalRegs];		// 儲存所有的 模擬 CPU Register (共40個)
+
+		-	public 變數
+    	(8)	AddrSpace *space;		// 指向 AddrSpace物件 = Page Table
+	
+	2>	public 方法
+		(1)	建構子 Thread(char* debugName, int threadID);
+			-	初始化 TCB(PCB): 設定 ID、name、stack、stackTop、status
+			-	指向 Page Table 物件的指標 = NULL
+
+		(2)	void Fork(VoidFunctionPtr func, void *arg); [New -> Ready]
+			-	主要功能：初始化 Thread 的 Kernel Stack空間 & 將 Thread 排進 RQ
+
+			(1)	call StackAllocate(..)
+				-	幫 Thread 配置 Kernel Stack空間 & 初始化 (將 ThreadRoot位址 Push 到 Stack中)
+				-	指定將來要執行的函數(func) & 參數(arg)
+			(2)	將此Thread 排進 ReadyQueue = scheduler->ReadyToRun(this);
+
+			-	Note：NachOS Create Child Threat 的流程
+				-	Thread* newThread = new Thread("New Thread");   // new 一個 Thread物件 = 有了 TCB(PCB)
+				-	newThread->Fork(ForkExecute,Arg);	// 配置 Kernel Stack空間、排入 Ready Queue)
+				-	ForkExecute() 執行後，會將 檔案 = User Program 載入到 記憶體中執行
+					-> AddrSpace::Load()、AddrSpace::Execute() -> InitRegisters()、RestoreState()、machine->Run()
+
+		(3)	void Yield(); [Run -> Ready]
+			-	主要功能：暫停 currentThread(未結束) 送回 RQ,先讓其他 Thread 執行
+				-	nextThread = kernel->scheduler->FindNextToRun();
+				-	if (nextThread != NULL)
+					-	kernel->scheduler->ReadyToRun(this);
+					-	kernel->scheduler->Run(nextThread, FALSE);
+				-	若不想讓 currentThread 回到 RQ，可以讓 FindNextToRun() 回傳 NULL
+
+			-    是不可中斷的「原子操作(Atomic operation)」= 要先關中斷才能執行
+
+
+
+		(4)	void Sleep(bool finishing); [Run -> Waiting(FALSE)、Terminate(TRUE)]
+			-   主要功能：自行設定 暫停/結束 currentThread，並從 RQ 取出 next Thread 執行
+			-	注意：若 RQ = 空，則會 呼叫 kernel->interrupt->Idle() -> CheckIfDue(TRUE)
+					直接跳到下個中斷發生（這是唯一讓 Thread 重新回到 RQ 的途徑）
+			-   是不可中斷的「原子操作(Atomic operation)」= 要先關中斷才能執行
+
+			- Note:  當 Thread 在Blocked狀態 = Waiting Queue
+					最終會有其他 Thread 將 Waiting Queue 的 Thread 喚醒、放回 Ready Queue)
+
+		(5)	已經由 StackAllocate() 存在 TCB(PCB) 中，並在未來 由 ThreadRoot(..) 呼叫
+			-	void Begin() = void ThreadBegin()
+				-	刪去 toBeDestroyed 指向的 Thread & 啟用 interrupt
+			-	void Finish() = 等同 void ThreadFinish()
+				-	關閉 interrupt & 將此 Thread 設為 Sleep(TRUE)
+
+		(6)	在 User Mode 下暫存/回復「模擬CPU Reg值」
+			-	void SaveUserState()、void RestoreUserState() (會在 Scheduler::Run() 中呼叫)
+
+	3>	private 方法
+    	-	void StackAllocate(VoidFunctionPtr func, void *arg);	
+			-	由 fork()呼叫
+			-	用來配置 & 初始化 Thread 的 Kernel Stack
+            (1)	配置 Kernel Stack 空間 = StackSize * sizeof(int) (定義在 thread.h)
+            (2)	初始化 Kernel stack
+				包含 Push ThreadRoot(..)位址 & 將 Magic Num 存入 Stack 端點
+			(3)	初始化「剛建立 Thread」的「起始Reg值」
+                -	設定初始 TCB(PCB) 中 machineState[]的值
+                	包含：ThreadRoot()、ThreadBegin()、func()、Arg、ThreadFinish()
+                -	當 Thread 在 Context Switch 後，將 machineState[] 所存 Reg值 載回 CPU Reg
+                	此時 CPU 即可根據 Reg值 來執行 剛建立的 Thread
+
+		-	Note: 一個 執行 user program 的 Thread 會儲存「兩組 CPU register states」
+		(1)	「模擬CPU reg」存在 userRegisters[] 
+			-	使用 User stack (由 AddrSpace::Load() 配置)
+		(2)	「Host CPU reg」存在 machineState[]
+			-	使用 Kernel stack (由 Thread::StackAllocate() 配置)
+
+4.	[Rw] class Scheduler
+	-	提供一個 ReadyQueue & toBeDestroyed指標指向下一個結束的Thread
+	-	主要功能：安排 thread 進 ReadyQueue、分配 CPU資源、刪去 thread ...etc
+	1>	public 方法
+		(1)	將 Thread 丟進 Ready Queue
+			-	void ReadyToRun(Thread* thread);	
+				-	thread->setStatus(READY);
+				-	readyList->Append(thread);
+    		-	條件：kernel->interrupt->getLevel() == IntOff (禁止中斷時，才能做這件事)
+
+    	(2)	從 RQ 挑出 1st Thread 分配 CPU資源
+			-	Thread* FindNextToRun();
+				-	RQ 為空：return NULL (跳過 Dequeue 的步驟，可繼續執行 currentThread)
+				-	RQ 不為空：return readyList->RemoveFront()
+    		-	條件：kernel->interrupt->getLevel() == IntOff (禁止中斷時，才能做這件事)
+
+		(3)	Context Switch 
+			-	void Run(Thread* nextThread, bool finishing);
+			-	意義：開始 Run nextThread (暫停/終止 currentThread)
+			-	主要功能
+				-	依照 參數finishing 決定 暫存/終結() oldThread
+					-	若 finishing = TRUE
+						oldThread 會在下一次 Secheduler::Run() 或 newThread 的 Thread::Begin() 中 被刪去
+				-	nextThread 設為 Running
+				-	Context Switch：切換到 nextThread執行
+					(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+					(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+
+		(4)	將 toBeDestroyed 指向的 Thread 刪除
+			-	void CheckToBeDestroyed();
+				-	delete toBeDestroyed;
+				-	由 ThreadBegin() = Thread::Begin() & scheduler->Run() 呼叫
+    
+  	2>	private 變數
+		(1)	List<Thread *> *readyList;  // ReadyQueue
+		(2)	Thread *toBeDestroyed;		// 指向 已結束/待刪除 的Thread
+
+[B]	Running → Ready
+
+##	Trace 路徑
+	-	Machine::Run()  
+	-	Interrupt::OneTick()  
+	-	Thread::Yield()  
+	-	Scheduler::FindNextToRun()
+	-	Scheduler::ReadyToRun(Thread*)
+	-	Scheduler::Run(Thread*, bool)
+
+5.	[Rw] class Machine 主要使用 Machine::Run()
+	0>	註記一下，machine.h 有定義
+		(1)	PageSize = 128 Bytes		// 代表 模擬機器提供的 FrameSize
+		(2)	NumPhysPages = 128			// 代表 模擬機器提供的實體記憶體 的 frame數目
+			MemorySize = NumPhysPages * PageSize
+		(3)	TLBSize = 4					// 代表 模擬機器提供的 TLB 的 Entry 數目
+
+	1>	public 方法
+		(1)	建構子、解構子
+		(2)	Run() = CPU 開始執行 User Program 的指令 (in mipssim.cc)
+			-	由 Kernel::Exec() -> ForkExecute() -> AddrSpace::Execute() 呼叫
+			-	主要流程
+			(0)	陷入無窮迴圈 for(;;)
+			(1)	設為 UserMode
+			(2)	OneInstruction(instr);			// 從 PC 指向的資料，取出/執行一道指令
+				(因在 AddrSpace::Execute() 中 this->InitRegisters() 已經將 模擬 PC 設成0)
+				(故 此時 PC 會從「虛擬記憶體」第0筆指令 開始讀取 )
+			(3)	kernel->interrupt->OneTick(); 	// 模擬 時間前進 1 Tick
+
+		(3)	存取 Register 的函式：ReadRegister(..)、WriteRegister(..)
+		(4)	存取 Memory 的函式 (實作在 translate.cc)
+			-	ReadMem(int addr, int size, int* value);		
+				WriteMem(int addr, int size, int* value);
+			-	呼叫 Machine::Translate(..) 將 addr(虛擬位址) 轉成 physicalAddress(實體位址)
+			-	根據 size 存取資料: 讀入 *value 或從 *value 寫入
+		
+	2>	public 變數
+		(1) char *mainMemory;			// 模擬的主記憶體，用一個 char指標 指向「模擬的主記憶體空間」
+		(2)	TranslationEntry *tlb;		// 指向 TLB 的指標
+		(3)	pageTable
+			-	TranslationEntry *pageTable;
+			-	unsigned int pageTableSize;
+
+	3>	private 方法
+		(1)	void DelayedLoad(int nextReg, int nextVal);	// 將 下個存取的 Reg & Val 延遲處理，見 MP1
+		(2)	void OneInstruction(Instruction *instr);	// 從 PC 指向的資料，取出/執行一道指令
+
+		(3)	翻譯位址/檢查是否異常
+			ExceptionType Translate(int virtAddr, int* physAddr, int size, bool writing);
+			-	在 translate.cc 實作
+			-	每次使用 WriteMem(..) & ReadMem(..) 都會呼叫到
+				其中 WriteMem(..) & ReadMem(..) 用於 Machine::OneInstruction() 內部
+		(4) RaiseException(..)、Debugger()、DumpState()		// 例外事件處理函式、Debugger、印出狀態函式，見 MP1
+
+	4>	private 變數
+		(1)	int registers[NumTotalRegs];
+		(2)	debugger時會用到：bool singleStep、int runUntilTime
+
+6.	模擬硬體 的 class架構
+	-	在 NachOS 所有的「模擬硬體 class」都是繼承於 CallBackObj
+		方便將 該硬體的 ISR 統一命名為 CallBack()
+
+	1>	class ConsoleOutput : public CallBackObj
+		-	建立 ConsoleOutput物件 = 模擬硬體 的 儲存裝置/螢幕
+		-	private 成員
+			(1)	int writeFileNo;			// 檔案編號 ( 1:螢幕、fd：已開啟的檔案編號 )
+			(3)	CallBackObj *callWhenDone;  // 指向 SynchConsoleOutput物件 的位址
+			(2)	bool putBusy;				// 指示目前 ConsoleOutput 是否正在工作 (TRUE 為是)
+
+		-	public 方法
+			(1)	建構子：ConsoleOutput(char *writeFile, CallBackObj *toCall)
+				-	功能：初始化「寫入檔案」、寫入完成時呼叫的ISR
+				-	呼叫時機：在 class SynchConsoleOutput 建構時，一起建構 class ConsoleOutput
+					-	consoleOutput = new ConsoleOutput(outputFile, this);
+					-	this = SynchConsoleOutput物件
+				
+			(2)	void PutChar(char ch);
+				-	功能
+					-	檢查 PutChar()是否正在進行中，若是，則不可再次執行()
+						( ASSERT(putBusy == FALSE); )
+					-	將 字元ch 寫入檔案/印在螢幕
+					-	設定 PutChar() 正在忙碌中( putBusy = TRUE; )
+					-	設定「待執行中斷」在寫入完成後引發( ConsoleTime個 Ticks 後發生)
+						-	ISR：this->CallBack() = ConsoleOutput->CallBack()
+						-	ConsoleTime = 100，定義在 stats.h
+
+			(3)	void CallBack();
+				-	呼叫時機：
+					-	CallBack() = 中斷服務程式(ISR)，表示 硬體工作結束時，呼叫的中斷服務
+					-	對 ConsoleOutput 而言，表示「上一個字元已被印出」，下一個字元可以開始列印
+				-	功能：
+					-	當中斷發生 = PutChar(..) 工作已完成，設定為「非忙碌中 = putBusy = FALSE;」
+					-	在 stats 紀錄「寫入的Bytes數+1」
+					-	呼叫 下一層 ISR = callWhenDone->CallBack() = SynchConsoleOutput->CallBack()
+						執行 waitFor->V()，即宣布 目前自己 已不佔用 ConsoleOutput
+
+	2>	class SynchConsoleOutput : public CallBackObj
+		-	建立 SynchConsoleOutput物件 = 同步操作「模擬螢幕」的物件
+		-	建議先看 9. & 10. & 11.
+
+		-	private 成員
+			-	ConsoleOutput *consoleOutput;	//	指向「模擬螢幕」= ConsoleOutput物件
+    		-	Lock *lock;						//	指向 Lock 物件
+    		-	Semaphore *waitFor;				//	指向 Semaphore物件
+
+    		-	void CallBack();				//	功能：呼叫 waitFor->V() 解鎖硬體
+
+		-	public 方法
+			(1)	建構子：SynchConsoleOutput(char *outputFile);
+				-	建立/初始化 模擬硬體(ConsoleOutput)物件、Lock物件、Semaphore物件
+
+    		(2)	void PutChar(char ch);
+				-	將「硬體上鎖」並開始寫入字元(ch) & 在完成後將「硬體解鎖」
+    
+    		(3)	void PutInt(int value);
+				-	將「硬體上鎖」並開始寫入「字元陣列(str)」 & 在完成後將「硬體解鎖」
+
+
+	3>	class Alarm : public CallBackObj
+		-	建立的 Alarm 物件 = 建立一個 可操作的Timer，並 每x個 Tick 產生一次中斷
+		(1)	public 方法
+			-	Alarm(bool doRandomYield);
+				-	new 一個 模擬的Timer物件
+				-	設定中斷(Time out)發生時，呼叫的 ISR = Alarm->CallBack();
+					(new Timer(doRandom, this); -> callPeriodically = tocall = this)
+			
+    		-	~Alarm() { delete timer; }
+    
+    		-	void WaitUntil(int x);	//	尚未實作
+				-	等待時間，直到 time > now + x
+
+		(2)	private 變數
+    		-	Timer *timer;			//	指向 模擬的Timer物件
+    		-	void CallBack();		//	每次 Time out 會呼叫的 ISR
+				-	功能：呼叫 interrupt->YieldOnReturn()，提示系統「可以開始 Context Switch」
+				-	流程
+					-	在 Alarm(..) 時建構的 new Timer(..); 會呼叫 SetInterrupt() 設定 Time Out 發生時間 = 100 Ticks 之後
+					-	當 100 Ticks 之後，Time Out 中斷發生
+					-	呼叫 Timer->CallBack()，會做 2件事
+						-	呼叫 Alarm->CallBack();	//	提示系統「可以開始 Context Switch」
+						-	呼叫 SetInterrupt();	//	再次設定一次 100 Ticks 以後發生的中斷
+
+					-	當 Machine::Run() 中 OneInstruction(instr) 結束，會呼叫 kernel->interrupt->OneTick()
+						此時會檢查 是否要進行 Context Switch，若需要切換(yieldOnReturn = TRUE)
+						則呼叫 kernel->currentThread->Yield() = 暫停 currentThread(未結束) 送回RQ，先讓其他 Thread 執行 
+
+		(3)	Time Out 中斷的設定
+			-	在 class timer 中的 Timer::SetInterrupt() 方法
+			-	SetInterrupt() 會呼叫 kernel->interrupt->Schedule(this, delay, TimerInt);
+				-	this = Timer物件本身
+				-	delay = TimerTicks
+					其中 const int TimerTicks = 100; (在 machine/stats.h 中設定)
+
+				-	故會在 100 Ticks 之後，呼叫 Timer->CallBack()，其中會做 2件事
+					-	呼叫 Alarm->CallBack();	//	提示系統「可以開始 Context Switch」
+					-	呼叫 SetInterrupt();	//	再次設定一次 100 Ticks 以後發生的中斷
+
+7.	class Interrupt (in machine/)
+	-	建立的 Interrupt 物件 = 儲存「待執行中斷的List」、中斷啟用狀態、電腦狀態..等
+
+	-	模擬 硬體中斷
+		-	可透過 SetLevel() 來開啟/關閉 中斷功能
+		-	無法如真實硬體一樣，隨時發出中斷訊號，而是在特定時刻才會發出中斷
+	-	模擬 時間前進（只有以下 3種情況 會 模擬時間 前進）
+		(1)	interrupts 被重新啟用時，模擬時間前進
+		(2)	執行一個 User Instruction 後，模擬時間前進
+		(3)	Ready Queue 為空的時候，模擬時間前進
+
+	-	硬體中斷的類型 (IntType)
+		-	TimerInt, DiskInt
+		-	ConsoleWriteInt, ConsoleReadInt 
+		-	NetworkSendInt, NetworkRecvInt
+
+	1>	class PendingInterrupt
+		-	建立的 PendingInterrupt 物件 = 儲存一個「待執行中斷」的「ISR & 發生時間 & 中斷類型」
+		-	public 成員
+			(1)	建構子：建立一個「待執行中斷」
+				PendingInterrupt(CallBackObj *callOnInt, int time, IntType kind);
+				-	設定 callOnInterrupt = callOnInt
+				-	when = time、type = kind
+
+			(2)	CallBackObj *callOnInterrupt;
+				-	指標 callOnInterrupt 指向「模擬硬體設備 的 物件」
+				-	callOnInterrupt->CallBack();	// 會指向 該硬體設備的 ISR
+				-	ex.	callOnInterrupt 指向 ConsoleOutput 建立的物件位址
+						callOnInterrupt->CallBack() 指向 ConsoleOutput->CallBack()
+						（當 ConsoleOutput(螢幕) 工作完成，可呼叫此 ISR 通知 CPU）
+			(3)	int when;		//	中斷應發生的時刻 = 呼叫 ISR 的時刻
+			(4)	IntType type;	//	中斷的類型
+
+	2>	private 變數
+		(1)	IntStatus level;	// 整個硬體中斷的開關 {IntOff, IntOn}
+
+    	(2)	SortedList<PendingInterrupt *> *pending;	
+			-	pending 是個指向 Sorted List 的指標，Node 的型態是 PendingInterrupt *
+				即該 Sorted List 依序存放「待執行中斷的位址」
+
+    	(3)	bool inHandler;			//	是否正在執行 Interrupt handler = ISR
+
+		(4)	bool yieldOnReturn;
+			-	用來提示 OS 進行 Context Switch (TRUE:可進行 Context Switch)
+			-	會在 OneTick() 中檢查 此變數值，並決定是否執行 Context Switch
+
+    	(5)	MachineStatus status;	// idle, kernel mode, user mode
+
+	3>	public/private 方法 (用來模擬 硬體中斷的函示)
+		(1)	建構子、解構子
+	  		-	Interrupt();		
+				-	初始化：關閉中斷、new pending List、設定為 Kernel Mode
+    		-	~Interrupt();		// 解構子主要 delete 整個 pending List
+
+		(2)	[private] void ChangeLevel(IntStatus old, IntStatus now);
+			-	功能：設定中斷狀態 = now (不觸發「模擬時間前進」)
+
+    	(3)	IntStatus SetLevel(IntStatus now);
+			-	功能：設定中斷狀態為now，並回傳「先前的中斷狀態」，若由 OFF->ON 則前進 1 Tick
+			-	主要工作
+				(1)	儲存「原本的 中斷狀態(ON/OFF)=old」
+            	(2)	更新中斷狀態 = now，並回傳 原本的中斷狀態(old)
+					(配合 ChangeLevel(old, now);)
+            	(3)	若中斷狀態 由 OFF(old)->ON(now)，則 前進 1 Tick
+
+    	(4)	void OneTick();
+			-	功能
+				(1)	模擬 時間前進 1個 or 10個 Tick
+					-	User Mode：前進 1 Tick
+					-	Kernel Mode：前進 10 Tick
+				(2)	檢查是否有「待執行中斷」可以「現在」執行(若無，不必快轉)
+                	-	若有，則執行該中斷
+                	-	若無，不必快轉，因為 advanceClock = FALSE
+				(3)	檢查是否需要 Context Switch
+					-	若有(yieldOnReturn = TRUE)，則進行 Context Switch
+						-	yieldOnReturn 設為 FALSE
+						-	切到 Kernel Mode，呼叫 kernel->currentThread->Yield();
+						-	暫停 currentThread(未結束) 送回RQ，先讓其他 Thread 執行 
+
+					-	若無(yieldOnReturn = FALSE)，則跳過
+
+			-	被呼叫的時機
+				(1)	中斷「重新啟用」= SetLevel(IntOn);
+				(2)	模擬 CPU 執行一個 User Instruction 後 (Kernel 不算)
+					(在 Machine::Run() 中呼叫)
+
+		(5)	void YieldOnReturn();
+			-	功能：設定變數 yieldOnReturn = TRUE，下次呼叫 OneTick() 會執行「Context Switch」
+
+			-	呼叫時機：Time out 發生，在 Alarm->CallBack() = ISR 中 呼叫 interrupt->YieldOnReturn()
+				[重要!!!]此處就是「RR 排班」的實現
+
+		(6)	[重要! RR排班] Time out 引發 Context Switch 流程
+			-	Time out 發生，呼叫 Alarm->CallBack() = 只做一件事(不要懷疑)
+				-	呼叫 interrupt->YieldOnReturn()，提示系統 下次呼叫 OneTick() 時「可以執行 Context Switch」
+					(設定 yieldOnReturn = TRUE)
+				-	可在此處，決定要不要在「下次 Time Out」執行 Context Switch 
+
+			-	當 Machine::Run() 中 OneInstruction(instr) 結束，會呼叫 kernel->interrupt->OneTick()
+				此時會檢查 是否要進行 Context Switch，若需要切換，則呼叫 kernel->currentThread->Yield()
+
+			-	kernel->currentThread->Yield()
+				-	暫停 currentThread(未結束) 送回RQ，先讓其他 Thread 執行 
+				-	nextThread = kernel->scheduler->FindNextToRun();	//	Pop out 1st Thread
+				-	kernel->scheduler->ReadyToRun(this);				//	currentThread 排入 ReadyQueue
+				-	kernel->scheduler->Run(nextThread, FALSE);			//	Context Switch 到 nextThread
+
+		(7)	void Interrupt::Schedule(CallBackObj *toCall, int fromNow, IntType type)
+			-	功能：安排一個「待執行中斷」到 pending List 中
+			-	傳入參數
+				-	CallBackObj *toCall：指標 指向「引發中斷」的 模擬硬體物件
+				-	int fromNow：經過 fromNow 個 Ticks 之後，要印發中斷
+				-	IntType type：中斷類型
+
+			-	呼叫時機：各種「模擬硬體」要安排「待執行中斷」的觸發時機時，呼叫此函式
+
+				ex.	kernel->interrupt->Schedule(this, 100, TimerInt);
+					表示 在 100 Ticks 之後 中斷發生，要呼叫 this->CallBack()；而 中斷類型 = TimerInt
+
+			-	主要工作
+				-	設定觸發時間 when = totalTicks + fromNow
+				-	new 一個待執行中斷(toOccur) = new PendingInterrupt(toCall, when, type);
+				-	將 待執行中斷(toOccur) insert 到 pending List 中
+
+		(8)	[private] bool CheckIfDue(bool advanceClock);
+			-	功能：檢查是否有「待執行中斷」可以在「現在」執行 = 模擬硬體中斷發生的地方
+				-	若有，則執行下個中斷
+				-	若無 = 下個中斷發生的時間未到
+					-	advanceClock = FALSE：直接 reutrn FALSE，表示沒有「可發生中斷」
+					-	advanceClock = TRUE：快轉時間 + 執行下個中斷 (當模擬系統 Idle 時採用)
+					
+			-	傳入參數：bool advanceClock
+				-	若為 TRUE 表示 RQ 為空，應「模擬時間前進」直到下個中斷發生的時刻
+			-	主要工作
+				-	檢查 pending List 是否為空（若為空，reutrn FALSE）
+				-	若下個待執行中斷「應發生的時間」還沒到
+					(1)	advanceClock = FALSE：不快轉 模擬時間，reutrn FALSE
+					(2)	advanceClock = TRUE：快轉 模擬時間 到「應發生下個中斷的時間」
+						-	更新 idleTicks = 應等待的時間 = 總共快轉的時間
+						-	更新 totalTicks 為 待執行中斷 發生的時間點
+
+				-	執行 待執行中斷 = Interrupt Handler = ISR (設定inHandler = TRUE)
+					-	進入 do 迴圈
+						-	Pop 最優先的「待執行中斷」存入 next = pending->RemoveFront()
+						-	執行「最優先」的「待執行中斷 的 ISR(中斷服務程式)」
+							next->callOnInterrupt->CallBack();
+
+							即 呼叫 *callOnInterrupt指向 的硬體設備(物件)中的 CallBack()方法 = ISR
+							-	ex.	callOnInterrupt 指向 ConsoleOutput 物件位址
+									則 ISR = ConsoleOutput::CallBack() = callOnInterrupt->CallBack() 
+									表示 上一個字元已被印出(螢幕工作完成)，下一個字元可以開始列印(呼叫此ISR，通知 CPU)
+									(可設定 putBusy = FALSE & 呼叫上一層的 SynchConsoleOutput::CallBack())
+
+
+					-	若 pending List ≠ 空 且 pending List中「最優先 的 待執行中斷」到了要發生的時刻
+						則回到迴圈第一步，執行該中斷，直到「沒有 待執行中斷 需要執行」
+
+				-	停止執行 待執行中斷 = Interrupt Handler = ISR (設定inHandler = FALSE)
+				-	return TRUE
+
+		(9)	void Idle();
+			-	時機：當 Ready Queue = 空，由其他函示呼叫 Idle()
+			-	功能：
+				-	設定 系統狀態 = IdleMode
+				-	檢查有無「待執行中斷」(pending List 是否為空)
+					-	若有，則快轉到中斷發生的時刻，並執行該中斷
+					-	若無，則關閉機器(delete kernel)
+
+		(10)	其他方法 & 功能
+			-	void Enable() { (void) SetLevel(IntOn); }	//	啟用中斷
+			-	IntStatus getLevel() {return level;}		//	取得中斷狀態
+
+			-	MachineStatus getStatus() { return status; }		//	取得電腦狀態
+			-	void setStatus(MachineStatus st) { status = st; }	//	設定電腦狀態
+
+			-	void Halt();			//	Delete Kernel
+			-	void DumpState();		//	印出中斷的狀態、pending List
+
+8.	Running → Ready 的流程
+	(0)	當 new Thread 開始執行 ForkExecute(..)
+		->	AddrSpace::Load()、AddrSpace::Execute() -> InitRegisters()、RestoreState()、machine->Run()
+	(1)	machine->Run() 主要呼叫 2個方法
+		-	OneInstruction(instr);			//	執行一道 User Instruction，模擬 PC 指向下一道指令
+		-	kernel->interrupt->OneTick()	//	在 User Mode 下，模擬時間 前進 1 Tick
+			-	模擬 時間前進
+			-	檢查是否有「待執行中斷」可以「現在」執行(若無，不必快轉)
+				(注意：在 NachOS 系統中，中斷不會隨時發生，只有呼叫 CheckIfDue() 才會呼叫 應發生中斷的ISR)
+				-	CheckIfDue(FALSE);
+				-	若此時發生「Time out」，呼叫 alarm->CallBack() 會設定 yieldOnReturn = TRUE
+
+			-	檢查是否需要 Context Switch = if (yieldOnReturn)
+				-	若已發生「Time out」，呼叫 kernel->currentThread->Yield();
+
+	(2)	kernel->currentThread->Yield(); [Running -> Ready]
+		-	功能：Context Switch = 暫停 currentThread(未結束) 送回RQ，先讓其他 Thread 執行 
+		-	nextThread = kernel->scheduler->FindNextToRun();	//	Pop out 1st Thread
+			( readyList->RemoveFront(); )
+		-	kernel->scheduler->ReadyToRun(this);				//	currentThread 排入 ReadyQueue
+			( readyList->Append(thread); )
+		-	kernel->scheduler->Run(nextThread, FALSE);			//	Context Switch 到 nextThread
+
+	(3)	kernel->scheduler->Run(Thread *nextThread, bool finishing);	// Context Switch 的實作
+		-	依照 參數finishing 決定 暫存/終結() oldThread
+		-	Context Switch：切換到 nextThread執行
+			[0]	分別在 [1]、[2] 前半部中，儲存 currentThread 的 Host Reg & 模擬 Reg 
+
+			[1]	切換 Thread 的 Host CPU Reg：SWITCH(oldThread, nextThread) in switch.s
+				(詳情請見 OS_MP2筆記 的圖解)
+				-	將 oldThread 目前所使用的 CPU Reg(s) 暫存至 oldThread之TCB(PCB) 中
+                -	將 nextThread 暫存在 nextThread之TCB(PCB)的 Reg(s)值 載入「目前 CPU 的 Reg(s)」
+                -	回復 nextThread 之前的 PC值 給「目前的PC」
+                    (1)	若 nextThread 剛建立：PC 指向 ThreadRoot(..)
+						-	nextThread 依序執行 ThreadBegin() -> ForkExecute(..) -> ThreadFinish()
+						-	ForkExecute(..) 會執行 (0) 所述的工作
+
+                    (2) 若 nextThread 執行到一半：PC 指向 之前的 t2 PC
+						-	會回到 nextThread 的 scheduler->Run(..) 執行[2]的「回復 模擬 Reg & Page Table」
+
+			[2]	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+				-	儲存 oldThread 模擬 Reg & Page Table
+				-	回復 nextThread 模擬 Reg & Page Table
+
+		-	此時 nextThread 開始執行，oldThread 已經回到 Ready Queue
+
+
+[C]	Running → Waiting
+
+##	Trace 路徑
+	-	SynchConsoleOutput::PutChar(char)  
+	-	Semaphore::P() 
+	-	SynchList<T>::Append(T)  
+	-	Thread::Sleep(bool)  
+	-	Scheduler::FindNextToRun()  
+	-	Scheduler::Run(Thread*, bool)
+
+##	三種同步(上鎖/解鎖)機制：semaphores, locks, condition variables
+
+9.	class Semaphore 
+	-	建立的 Semaphore物件 = 儲存一個 Semaphore value & 一個「在等待 P() 的 Thread Queue」
+	-	目的：鎖住硬體，不讓「任何 Thread」取用
+		
+	-	兩個基本的「原子操作」（ 假設 NachOS Run 在單核心電腦，只需關閉中斷，即可達成原子操作）
+		(1)	P()：將 Thread 送入 Wait Queue [ Running -> Waiting ]，等到硬體完工，則「上鎖 + 獨自取用」
+		(2)	V()：將取用的硬體「解鎖」，Dequeue Wait Queue [ Waiting -> Running ]，供其他 Thread 取用
+
+	1>	private 變數
+		(1)	char* name;        // Debugging 時使用
+    	(2)	int value;         // Semaphore value >= 0 (旗號值，初始值 = 0)
+    	(3)	List<Thread *> *queue;     
+			-	一個存放 Thread 的 Waiting Queue，儲存所有「正在等待的 Threads」
+			-	每個「模擬硬體」會建立一個 Semaphore物件
+				表示 每個「模擬硬體」會私有一個 Waiting Queue
+
+	2>	public 方法
+		(1)	建構子 & 解構子 & getName()
+			-	Semaphore(char* debugName, int initialValue);
+				-	建構時機
+					在 操作模擬硬體的物件中，會順便 new 一個 Semaphore物件(旗號) 來指示 該硬體是否被佔用
+					( waitFor = new Semaphore("console out", 0); )
+
+				-	功能：設定初始 Semaphore value (一般 = 0)、建立 Wait Queue for P()
+
+    		-	~Semaphore();					//	delete queue
+			-	char* getName() { return name;}	//	Debugging 時使用
+    
+    	(2)	兩個 Atomic Operations(原子操作)
+			-	void P();
+				-	功能：
+					-	目前硬體被鎖住(未完工)，currentThread 需等待「硬體解鎖(完工) (Semaphore value > 0)」
+					-   將 currentThread 送入 Wait Queue，即 [ Running -> Waiting ]
+					-	等到解鎖(完工)後，切回 currentThread，並在取用硬體之前，需再次將「硬體鎖住 (value--)」
+
+				-	呼叫時機：Thread 呼叫 waitFor->P() 表示 Thread 需要等待「硬體解鎖」才能取用硬體
+
+				-	工作流程
+					-	關閉中斷(因為是 原子操作)
+					-	當 Semaphore value = 0 則進入迴圈，即 while (value == 0)
+						-	將 currentThread 放入 Wait Queue
+							( queue->Append(currentThread); )
+						-	強制 currentThread 睡眠 = Context Switch 到其他 Thread
+							( currentThread->Sleep(FALSE); ) [ Running -> Waiting ]
+
+					-	當 currentThread 結束等待、被喚醒後，回到此處
+						-	表示 Semaphore value > 0：模擬硬體「已解鎖(完工)」，currentThread 可以使用
+						-	currentThread 在使用之前，須先「鎖住」模擬硬體，故令 Semaphore value = 0
+							( value--; )
+						-	回復先前的「中斷狀態」= 結束 原子操作
+
+			-	void V();
+				-	功能：
+					-	目前硬體已完工，可將在 Wait Queue 等待的 Thread 放回 RQ [ Waiting -> Running ]
+					-	將硬體「解鎖 (value++;)」因為已經完工，可供 其他Thread 取用
+
+				-	呼叫時機：
+					-	當硬體完工，引發中斷、呼叫 ISR = 硬體物件->CallBack() 時，會呼叫 waitFor->V();
+						表示 硬體完工，將硬體解鎖(value > 0)，nextThread 可以取用硬體
+
+				-	工作流程
+					-	關閉中斷(因為是 原子操作)
+					-	呼叫 kernel->scheduler->ReadyToRun(queue->RemoveFront());
+						從 Wait Queue 中取出 nextThread 放回 Ready Queue
+
+					-	因為硬體已經完工，將硬體「解鎖 (value++;)」則有 Semaphore value > 0
+
+					-	回復先前的「中斷狀態」= 結束 原子操作
+
+    	(3)	測試用函數
+			-	void SelfTest();	// test routine for semaphore implementation
+				-	工作流程
+				[0]	建立 newThread 叫做 "ping"，並建立一個旗號 Semaphore 也叫 "ping"
+					並初始化 newThread 的 Kernel Stack，讓其為來執行 SelfTestHelper(..) & 排進 RQ
+					
+				[1]	oldThread 執行 ping->V(); (共10次)，即 宣布「硬體已解鎖」
+					-	若 Time Out -> Alarm->CallBack() -> yieldOnReturn = TRUE
+						進行 Context Switch = 呼叫 kernel->currentThread->Yield(); -> [2]
+
+				[2]	切到 newThread 執行 SelfTestHelper (Semaphore *pong)
+					-	執行 ping->P(); (共10次)，即 宣布「硬體已鎖(正使用中)」
+					-	newThread 進入 Wait Queue 切回 oldThread -> [1]
+
+10.	class Lock 
+	-	建立的 Lock物件 = 儲存一個 semaphore物件(來代表 硬體是否被上鎖)、上鎖人(lockholder)
+	-	目的：鎖住硬體，僅讓「上鎖人 Thread」取用
+		
+	-	兩個基本的「原子操作」（ 假設 NachOS Run 在單核心電腦，只需關閉中斷，即可達成原子操作）
+		(1)	Acquire()
+			[1] 目前硬體未鎖，Thread 可申請使用，並將硬體上鎖(令Lock = BUSY)
+			[2]	目前硬體被鎖(未完工，表示 Lock = BUSY)，需等候 Lock = FREE
+				等到解鎖(完工，表示 Lock = FREE)後，在取用硬體之前，需再次將「硬體鎖住(令Lock = BUSY)」
+		(2)	Release()
+			-	目前硬體已完工，可將在 Wait Queue 等待的 nextThread 放回 RQ
+			-	並將硬體「解鎖」，令Lock = FREE，供 nextThread 獨自取用
+
+	1>	private 變數
+		(1)	char* name;        		// Debugging 時使用
+    	(2)	Thread *lockHolder;		// 指向「上鎖的 Thread」
+    	(3)	Semaphore *semaphore;	// 指向 Semaphore物件，用來實現 上鎖/解鎖
+
+	2>	public 方法
+		(1)	建構子 & 解構子 & getName()
+			-	Lock(char* debugName);  	// initialize lock to be FREE
+				-	建構時機
+					在 操作模擬硬體的物件中，會順便 new 一個 Lock物件(鎖) 來指示 該硬體是否被佔用
+					( lock = new Lock("console out"); )
+
+				-	功能
+					-	建立一個 Semaphore物件：設定初始 Semaphore value = 1、建立 Wait queue
+						(注意：Lock 一開始被建立時，令 Semaphore value = 1，表示大家可預約取用此硬體)
+					-	設定 lockHolder = NULL
+
+   			-	~Lock();							//	delete semaphore
+    		-	char* getName() { return name; }	//	Debugging 時使用
+
+		(2)	兩個 Atomic Operations(原子操作)
+			-	void Acquire();
+				-	工作：
+					-	呼叫 semaphore->P();
+						-	若 Lock 中的 Semaphore value = 1(初始值)，故此時 currentThread 不會陷入等待
+							而是會 value--; 將硬體鎖住(Semaphore value = 0)
+						-	若 Lock 中的 Semaphore value = 0，此時將 Thread 送入 Wait Queue
+							等硬體完工後，再將硬體再次上鎖，獨自取用
+
+					-	指示上鎖硬體的 Thread 是誰 ( lockHolder = kernel->currentThread; )
+				-	功能：
+					[1]	將「模擬硬體」上鎖，不讓其他 Thread 使用
+					[2]	等待硬體「解鎖」，再行取用
+				
+    		-	void Release();
+				-	工作：lockHolder = NULL; & semaphore->V(); 
+				-	功能：同 V()，從 Wait Queue 取出 Thread，並釋放 等待此 Lock 的 Thread
+
+		(3)	判斷硬體此時「被誰上鎖」
+			-	bool IsHeldByCurrentThread() { return lockHolder == kernel->currentThread; }
+			-	當 lockHolder == 自己時，回傳 TRUE
+			
+11.	Running → Waiting → Ready → Running 的流程 & 硬體的 上鎖 & 解鎖流程 (以 SynchConsoleOutput 為例)
+	1>	兩道鎖的使用
+		(1)	先以 lock物件 鎖定硬體 只能被「上鎖人」使用(1st鎖)
+			lock->Acquire();
+		(2)	硬體開始工作
+			consoleOutput->PutChar(ch);
+		(3)	再以 Semaphore物件「鎖住」未完工的硬體(2nd鎖)，以防「上鎖人」取用硬體，造成硬體錯誤
+			waitFor->P();
+		(4) 當硬體完工後，會引發中斷，呼叫 CallBack() -> waitFor->V() 讓硬體解鎖(2nd鎖)
+			此時「上鎖人」可再次使用硬體
+		(5)	切回「上鎖人」取用 CPU 後，再次上鎖硬體 waitFor->P() (2nd鎖)
+			-	可以 再次取用硬體
+			-	也可 解開 lock物件 鎖定的硬體(1st鎖)，令「上鎖人=NULL」，讓其他人取用硬體
+				lock->Release();
+
+	2>	Running → Waiting → Ready → Running 的流程
+		(0)	背景：建立 SynchConsoleOutput 物件時
+			-	建立「模擬硬體」物件，同時初始化 中斷發生時呼叫的 ISR = consoleOutput->CallBack()
+				-	consoleOutput = new ConsoleOutput(outputFile, this); 
+
+			-	建立 lock 物件 (1st鎖)
+				-	用來將「硬體上鎖」且僅供「上鎖人」使用
+				-	lock = new Lock("console out");				//	預設不上鎖 (1st鎖)
+
+			-	建立 Semaphore物件，僅表示「硬體本身」是否「上鎖」(2nd鎖)
+				-	用來將「硬體上鎖」且「任何 Thread 」皆無法使用
+				-	waitFor = new Semaphore("console out", 0);	//	預設上鎖 (2nd鎖)
+					( 初始化 Semaphore value = 0 )
+
+		(1)	currentThread 呼叫 SynchConsoleOutput::PutChar(char) 請硬體工作
+			-	呼叫 lock->Acquire();
+				-	將「模擬硬體 上鎖 (1st鎖)」並指示「上鎖人 = currentThread」
+				-	此時 currentThread 不會被排進 Waiting Queue 
+					(是其他 Thread 若要取用此硬體，才會被排進 Waiting Queue )
+					(注意：(2nd鎖) 是預設上鎖，即 Semaphore value = 0)
+
+			-	呼叫 consoleOutput->PutChar(ch) = 硬體開始工作
+				-	硬體(consoleOutput)會在此處「安排 待執行中斷」在 ConsoleTime 後觸發
+				-	設定 ISR = consoleOutput->CallBack()
+			-	呼叫 waitFor->P();
+				-	將 currentThread 送入 Wait Queue 等待完工
+				-	呼叫 currentThread->Sleep(FALSE);
+				-	此時 [ Running -> Waiting ]
+
+		(2)	硬體完工，引發中斷
+			-	呼叫 ISR = ConsoleOutput::CallBack() -> SynchConsoleOutput::CallBack()
+			-	呼叫 waitFor->V()
+				-	告知 OS 此硬體已完工(解2nd鎖)，可從 Wait Queue 取出 currentThread 放回 RQ 
+
+				-	呼叫 kernel->scheduler->ReadyToRun(queue->RemoveFront());	// Dequeue Wait Queue
+					[ Waiting -> Ready ]
+				-	令 Semaphore value++，此時 (2nd鎖) 解鎖
+				
+
+		(3)	Time Out 引發中斷後，呼叫 Thread::Yield() -> Scheduler::Run()
+			-	Context Switch = 暫停Thread(未結束) 送回RQ，Pop currentThread 執行
+			-	切回 currentThread 執行，回到 Scheduler::Run() 剩下的部分 [ Ready -> Running]
+				-	回到 waitFor->P(); 剩下的部分 = 上鎖、回復中斷狀態
+			-	再回到 SynchConsoleOutput::PutChar(char ch) 繼續執行
+				-	呼叫 lock->Release();
+					將「模擬硬體 解鎖 (解1st鎖)」並指示「上鎖人 = NULL」，此硬體可供其他 Thread 執行	
+
+[D]	Waiting → Ready
+
+##	Trace 路徑
+	-	Semaphore::V()  
+	-	Scheduler::ReadyToRun(Thread*) 
+	-	直接參照 11. 2> (2)
+
+[E]	Running → Terminated 
+
+##	Trace 路徑
+	-	ExceptionHandler(ExceptionType)  case SC_Exit
+	-	Thread::Finish()  
+ 	-	Thread::Sleep(bool)  
+	-	Scheduler::FindNextToRun()  
+	-	Scheduler::Run(Thread*, bool)
+
+12.	Running → Terminated 的流程
+	(1)	void ExceptionHandler(ExceptionType which) case SC_Exit (in exception.cc)
+		-	呼叫 kernel->currentThread->Finish();
+		-	關閉 interrupt & 呼叫 Sleep(TRUE)
+
+	(2)	Thread::Sleep(TRUE) [Run -> Terminate(TRUE)]
+		-   主要功能：自行設定 暫停/結束 currentThread，並從 RQ 取出 next Thread 執行
+		-	呼叫 nextThread = kernel->scheduler->FindNextToRun()
+			從 Ready Queue 中取出 nextThread
+		-	呼叫 kernel->scheduler->Run(nextThread, TRUE);
+
+	(3)	Scheduler::Run(nextThread, TRUE)
+		-	依照 參數finishing 決定 暫存/終結() oldThread
+			-	finishing = TRUE，toBeDestroyed = oldThread;
+
+		-	Context Switch：切換到 nextThread執行
+			(1)	切換 Thread 的 Host CPU Reg：SWITCH(..) in switch.s
+			(2)	切換 Thread 的 模擬 CPU Reg：Scheduler::Run() in scheduler.cc
+
+	(4)	切到 nextThread 
+		-	若 nextThread 剛建立 [ New -> Ready -> Running ]
+			-	會呼叫 ThreadRoot(..) 
+				依序執行 ThreadBegin() -> ForkExecute(..) -> ThreadFinish()
+				其中在 ThreadBegin() 會呼叫 CheckToBeDestroyed()，刪去 toBeDestroyed = oldThread 
+
+			-	ForkExecute(..) 會呼叫 AddrSpace::Load()、AddrSpace::Execute()
+				依序呼叫 InitRegisters()、RestoreState()、machine->Run() in 無窮迴圈... nextThread 開始執行
+
+		-	若 nextThread 不是剛建立，回到 scheduler->Run(..)
+			-	呼叫 CheckToBeDestroyed()，刪去 toBeDestroyed = oldThread
+			-	nextThread「回復 模擬 PC、Reg & Page Table」
+
+	(5)	此時，若 nextThread
+		-	路徑1：[ Waiting -> Ready -> Running ] 見 11. 2> (1)
+			-	nextThread 先前在 waitFor->P() 中，呼叫 Sleep(FALSE)，再呼叫 scheduler->Run(..)
+			-	故完成 scheduler->Run(..) 後，會返回 Sleep(FALSE) 再返回 waitFor->P()
+			-	繼續執行 waitFor->P() 剩下部分
+				-	上鎖、回復中斷狀態 -> 回到上一個操作的硬體函數 
+					-> 返回 machine->Run() in 無窮迴圈... nextThread 繼續執行
+
+		-	路徑2：[ Running -> Ready -> Running ] 見 8. 
+			-	nextThread 在 machine->Run() 中 執行完一道 User Instruction 後
+				在 OneTick() 中，引發 Time Out 中斷，呼叫 kernel->currentThread->Yield();
+				進而呼叫 kernel->scheduler->Run(nextThread, FALSE);
+			-	故完成 scheduler->Run(..) 後，會返回 kernel->currentThread->Yield();
+				回復中斷狀態，返回 OneTick()，回復 系統狀態
+			-	返回 machine->Run() in 無窮迴圈 ... nextThread 繼續執行
+
+[F]	Ready→Running
+
+##	Trace 路徑
+	-	Scheduler::FindNextToRun()  
+	-	Scheduler::Run(Thread*,   bool)  
+	-	SWITCH(Thread*,   Thread*)  // 可參考 OS_MP2
+	-	(depends on the previous process state, ex. [New,Running,Waiting]→Ready)  
+	-	Machine::Run()
+	-	直接參照 12. (5)
+
+===============================================================
+Part 2 Implement page table in NachOS
+===============================================================
+
+[A]	作業內容
+	Working item: 
+	1.	Multilevel feedback queue + Aging
+		-	3 Queue：L1(高優先)、L2、L3(低優先)
+		-	Global Priority：0～149 (數字越高、優先權越高)
+			-	L3：0～49
+			-	L2：50～99
+			-	L1：100～149
+		-	L1 採用 preemptive 近似 SJF
+			-	採用公式 Tn+1 = 0.5T + 0.5 Tn (型別：Double)
+			-	Thread 從 running 改成 waiting 狀態時，才可更新「近似 Burst Time」
+				若 Thread 因 Time out 被迫返回 RQ 時，「近似 Burst Time 要持續累加到完工為止」
+				-	近似 Burst Time = Wait & Wait 之間 Running 的時間總和
+		-	L2 採用 non-preemptive priority
+		-	L3 採用 RR with TQ = 100 ticks (即 NachOS 預設)
+		
+		-	Aging 機制
+			-	等候超過 1500 Ticks 優先權 + 10
+				(等候的定義，Thread 被創立後，不在 Running State 的時間總和)
+			-	Aging 的操作可以被 Delay 發生，直到 Timer Alarm 被觸發(每 100 Ticks 出發一次)
+
+		-	注意：所有的 插隊(Preempt) 都只能發生在 Time Out(不能自己修改/新增 Interrupt)
+
+	2.	加入 command line argument "-ep" 來初始化 Process 的優先權
+		-	ex.	$ ../build.linux/nachos -ep test1 40 -ep test2 80
+				test1 優先權=40、test2 優先權=80
+
+	3.	加入 debugging flag 'z' 來印出以下資訊 (修改 debug.h、debug.cc)
+		-	ex.	DEBUG('z', expr)
+			-	Process 加入 RQ 時，印出
+				-	Scheduler::ReadyToRun (Thread *thread)
+				[A] Tick [{ 現在總Tick數 }]: Thread [{ TID }] is inserted into queue L[{ Queue編號 }]
+				ex.	DEBUG(dbgz, "Tick[" << kernel->stats->totalTicks << "]: Thread [ " << TID << " ] is inserted into queue L[ " << Queue編號 << "]");
+
+			-	Process 從 RQ 移出時，印出
+				-	Scheduler::FindNextToRun ()
+				[B] Tick [{ 現在總Tick數 }]: Thread [{ TID }] is removed from queue L[{ Queue編號 }]
+
+			-	Process 改變優先權時，印出
+				[C] Tick [{ 現在總Tick數 }]: Thread [{ TID }] changes its priority from [{舊值}] to [{新值}]
+
+			-	Process 更新 近似Burst Time 時，印出
+				[D] Tick [{ 現在總Tick數 }]: Thread [{ TID }] update approximate burst time, from: [{Tn}], add [{T}], to [{Tn+1}]
+
+			-	Context Switch 發生時，印出
+				-	Scheduler::Run ()
+				[E] Tick [{ 現在總Tick數 }]: Thread [{new TID }] is now selected for execution, 
+					thread [{ prev TID }] is replaced, and it has executed [{accumulated ticks}] ticks
+
+	Rules
+	-	除了 Instructions 2 的指示外，不可修改 machine 資料夾下的 code
+	-	不可呼叫 Interrupt::Schedule() 
+	-	建議，所有修改的 Code 主要撰寫在 .cc 檔案，只留 Prototype 在 .h 檔案
+
+	-	To observe scheduling easily by PrintInt(), change ConsoleTime to 1 in machine/stats.h.
+		const int ConsoleTime = 1;
+	-	Comment out postOffice at Kernel::Initialize() and Kernel::~Kernel() in kernel.cc
+
+	Appendix A (一些測試用的例子)
+		../build.linux/nachos -ep hw3t1 0 -ep hw3t2 0 		#L3 
+		../build.linux/nachos -ep hw3t1 50 -ep hw3t2 50 	#L2 
+		../build.linux/nachos -ep hw3t1 50 -ep hw3t2 90 	#L2 
+		../build.linux/nachos -ep hw3t1 100 -ep hw3t2 100 	#L1 
+		../build.linux/nachos -ep hw3t1 40 -ep hw3t2 55 	#L3→L2 
+		../build.linux/nachos -ep hw3t1 40 -ep hw3t2 90 	#L3→L2 
+		../build.linux/nachos -ep hw3t1 90 -ep hw3t2 100 	#L2→L1
+
+	Appendix B  (需要 利用 DEBUG('z',expr) 印出 Process 在移動的細節)
+		../build.linux/nachos -ep hw3t1 100 -ep hw3t2 100 -d z 	#L1 
+		../build.linux/nachos -ep hw3t1 90 -ep hw3t2 100 -d z 	#L2→L1
+
+[B]	實作內容
+
+1.	實作大綱
+	(1)	Multilevel Feedback Queue
+		-	Global Priority：0～149 (數字越高、優先權越高)
+			-	透過在 TCB(class Thread) 新增成員 實作
+		-	3 Level Ready Queue 的基礎建設
+			(1)	Level 3 維持原樣、Level 1、2 為 SortedList
+			(2)	void Scheduler::ReadyToRun(..)
+				-	根據 Priority 決定 Thread 要加入那層 RQ
+				-	檢查是否可插隊 (Preempt)
+				-	紀錄 New Thread 被創建的時間
+			(3)	Thread * Scheduler::FindNextToRun()
+				-	從最高Level的 RQ 先取出 Thread
+
+	(2)	L1 採用 preemptive 近似 SJF (Key = 預測Burst Time)
+		-	下方 3. 4. 說明
+	
+	(3)	L2 採用 non-preemptive priority (Key = Priority)
+		-	將 Level 2 Ready Queue 改為 SortedList 即可
+		-	因不必插隊(Preempt)
+			-	故要限制 TimeOut 時，alarm->Callback() 中啟動 Yield()的條件 -> 排除 L2 Thread
+			-	其餘會自然依循 Sleep()->Run() 的方式 切換 Thread
+
+	(4)	L3 採用 RR with TQ = 100 ticks
+		-	即 NachOS 預設，不必修改
+		-	下方 3. 說明
+
+	(5)	Aging 機制
+		-	下方 5.	說明
+
+2.	修改的檔案
+	1>	scheduler.h & scheduler.cc
+		-	新增 class scheduler 成員
+			-	建立 3個 Ready Queue
+				-	List<Thread *> *readyList_L3;
+				-	SortedList<Thread *> *readyList_L2;
+				-	SortedList<Thread *> *readyList_L1
+			-	int preempFlag 	用來指示是否要 Preempt(插隊)
+			-	int CheckThreadRQ(..);	檢查 Thread 應待在哪層 RQ
+			-	void Aging();			[關鍵]實作 Aging 機制
+			-	bool CheckPreempt()		[關鍵]實現 Preemptive 的函數
+			-	void SetPreempt(..)
+		-	新增 SortedList 用的 Compare 函數
+			-	int CompareForSFJ(..)、int CompareForPriority()
+
+		-	修改 Scheduler::Scheduler()、Scheduler::~Scheduler()
+
+		-	修改 void Scheduler::ReadyToRun(..)
+		-	修改 Thread * Scheduler::FindNextToRun()
+
+		-	修改 void Scheduler::Run(..) 紀錄 nextThread 開始 Running 的時間點
+
+	2>	thread.h & thread.cc
+		-	新增 class Burst 用來記錄/預測 CPU burst time & 沒在 Running 的時間總和
+
+		-	新增 class Thread成員
+			-	int priority; & Burst *busrt;
+			-	int getPriority() & int setPriority(..)
+		-	修改 Thread::Thread(..) 初始化新成員
+
+		-	修改 void Thread::Yield () 以暫停計算 Thread 的 CPU Burst Time
+		-	修改 void Thread::Sleep (..)  以更新 預測 CPU Burst Time 
+
+	3>	alarm.cc：修改 void Alarm::CallBack() 
+	4>	kernel.h & kernel.cc
+		-	修改 int Exec(char* name); -> int Exec(char* name, int pry);
+		-	新增 class Kernel 成員 int execfilePry[10]; 以儲存開啟檔案的 Priority
+		-	修改 void Kernel::Initialize() 幫 main 設定最高優先權 
+
+3.	針對 Preempt(插隊) 時機
+	-	修改過的 NachOS 有 2 種 Preemptive 原因
+		1>  [原因一] Time Out Preempt
+			-	L3 RR排班，每 100 Ticks 會 Time Out 中斷並呼叫 Yield() = Preempt
+			-	呼叫路徑：
+				(1)	Machine::Run()->OneTick()->CheckIfDue()
+					在 NachOS 系統中，中斷不會隨時發生，只有呼叫 CheckIfDue()
+					才會將「應該發生中斷的ISR」呼叫過來
+				(2)	呼叫 中斷ISR = alarm->CallBack()
+					-	若 currentThread 屬於 L3，則設定 YieldOnReturn()
+						告訴 OS 要進行 插隊(Preempt)
+
+			-	插隊時機：模擬Timer 每 100 Ticks 會引發一次中斷，並呼叫 alarm->CallBack() 執行插隊
+
+		2>  [原因二] Other Preempt
+			-	藉由 preempFlag = TURE 提示 OS「需要呼叫 Yield() = Preempt」
+			-	呼叫路徑：
+				(1)	Machine::Run()->OneTick()->CheckIfDue()
+				(2)	呼叫 中斷ISR = alarm->CallBack()
+					-	若 preempFlag = TURE，告訴 OS 要進行 插隊(Preempt)
+
+			-	插隊時機：模擬Timer 每 100 Ticks 會引發一次中斷，並呼叫 alarm->CallBack() 執行插隊
+
+	-	CheckPreempt()
+		0>	功能
+			-	檢查目前是否「允許插隊(Preempt)」
+			-	設定 preempFlag (若 preempFlag = TURE 則會在 下個 Time Out 時，呼叫 Yield() 排班)
+
+		1>	呼叫(檢查)時機
+			(1)	模擬Timer 每 100 Ticks 會引發一次中斷 並會檢查/執行一次 Aging() + CheckPreempt()
+				-> 見 alarm->CallBack()
+
+			(2)	每次有 (非Running) Thread 被 insert 到 Ready Queue = ReadyToRun() 時
+				(非Running是指：Thread 在進入 RQ 之前「不是 Running State」，即 Thread 不是被 Yield() 送回RQ)
+				-> 見 ReadyToRun()
+
+		2>  「允許插隊(Preempt)」的條件有3種
+			(1) L3 Job Running & 目前 RQ_L1、RQ_L2 非空
+				-	允許 L1、L2 Job 打斷 Running 的 L3 Job
+			(2) L2 Job Running & 目前 RQ_L1 非空
+				-	允許 L1 Job 打斷 Running 的 L2 Job
+			(3) L1 Job Running & 目前 RQ_L1非空 且 RQ_L1中的 Job 更短
+				-	允許 L1 更段 Job 打斷 Running 的 L1 Job
+
+4.	針對 Level 1 Ready Queue 的 Preemptive SFJ 排班
+	1>	計算 預測 CPU Burst 的方法
+		-	公式：new預測時間(next) = 0.5 x 實際Burst Time(now) + 0.5 x old預測時間(next)
+
+		-	記錄變數
+			(1)	開始執行時間(start)：Thread 開始 Running 的時刻
+			(2)	結束執行時間(end)：Thread 結束 Running 的時刻，有兩種可能
+				-	[ Running -> Ready ] or [ Running -> Waiting/Terminate ]
+
+			(3)	實際Burst Time(now)：Thread 在 Wait & Wait 之間，Running 的時間
+			(4)	預測Burst Time(next)：用來為 SFJ 排班使用的 Key
+
+		-	實作：每次 [ Running -> Waiting/Terminate ] 時，更新 預測Burst Time(next)
+
+			(1)	開始執行時間(start)
+				-	[ Ready -> Running ]
+					-	在 Scheduler::Run(..) 中，nextThread「開始」計時 Running 時間(now)
+						設定 start = 現在時刻
+					-	因為 Scheduler::Run(..) 是所有 Thread 開始執行的入口
+
+			(2)	結束執行時間(end)、實際Burst Time(now)、預測Burst Time(next)
+				-	[ Running -> Ready ]
+					-	在 Thread::Yield () 中，需「暫停」計時 Running 時間(now)
+						-	設定 end = 現在時刻
+						-	求出 目前實際Burst Time(now)：PauseNow(..) -> now = end - start
+
+				-	[ Running -> Waiting/Terminate ] 
+					-	在 Thread::Sleep() 中，需「停止」計時 Running 時間(now) & 更新 預測Burst Time(next)
+						-	設定 end = 現在時刻
+						-	求出 本次實際Burst Time(now)：PauseNow(..)
+							-	若 now = 0 (沒有[上次]未結算的時間紀錄)：now = end - start
+							-	若 now ≠ 0 (有[上次]未結算的時間紀錄)：now = end - start + [上次]now
+						-	預測 下次Burst Time：UpdateNext() -> next = 0.5 now + 0.5 [上次]next
+						-	清空本次紀錄(now=0) 以計算下次實際Burst Time：ResetNow()
+
+	2>	排班時機：
+		-	Non-preemptive：Thread 在 Terminate 或 Blocked 會呼叫 Sleep() 自動 FindNextToRun() 來請 L1 Job 上場
+		-	Preemptive：參考 1>
+			-	插隊時機：
+				-	模擬Timer 每 100 Ticks 會引發一次中斷，並呼叫 alarm->CallBack()
+				-	若 preempFlag = TURE 則會呼叫 Yield() 進行插隊
+
+			-	檢查時機
+				(1)	每 100 Ticks 會檢查一次 Level 1 RQ 中 是否有「更短的」Thread (更短的 預測Burst Time)
+				(2)	每次有 (非Running) Thread 被 insert 到 Ready Queue
+					會檢查一次 Level 1 RQ 中 是否有「更短的」Thread 可以插隊
+
+5.	Aging 機制
+	-	定義：等候 超過 1500 Ticks 優先權 + 10
+	-	計算「等候時間」
+		-	等候時間 = Thread in Waiting & Ready 的時間總和
+		-	本次的等候時間
+			waitTime = 系統執行總時間 - Thread Running 總時間 - [上次]已算過等候時間
+			(見圖右)
+
+	-	執行時機：
+		-	模擬Timer 每 100 Ticks 會引發一次中斷 並會檢查/執行一次 Aging()
+		-	並在 執行完畢後，會馬上執行 CheckPreempt() 檢查是否因為 Priority 變動，導致需要插隊
+
+	-	工作流程：
+		(1)	若 Ready Queue 非空，計算 waitTime
+		(2)	若 waitTime > 1500，Thread Priority + 10
+		(3)	更新 [本次]已算過等候時間 = waitTime(本次的等候時間) + [上次]已算過等候時間
+		(4)	重新調整 Ready Queue
+
+		(5)	以上套用到 Level 3、2、1 Ready Queue
+		
+#Additional Note for vscode
+-	How to open multiple Windows for the same Working directory?
+	1.	Ctrl/Cmd + Shift + P to bring up the command palette
+	2.	Search for "Workspaces: Duplicate Workspace In New Window"
