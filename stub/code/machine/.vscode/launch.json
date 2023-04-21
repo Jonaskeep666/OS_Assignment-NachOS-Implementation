@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/jonaswu/Desktop/OS周志遠/Project/Nachos/NachOS-4.0_MP1/code/machine",
+      "program": "/Users/jonaswu/Desktop/OS周志遠/Project/Nachos/NachOS-4.0_MP1/code/machine/build/Debug/outDebug"
+    }
+  ]
+}
