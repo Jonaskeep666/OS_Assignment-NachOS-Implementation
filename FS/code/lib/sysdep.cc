@@ -341,6 +341,7 @@ void
 Read(int fd, char *buffer, int nBytes)
 {
     int retVal = read(fd, buffer, nBytes);
+    // cout << "nBytes=" << nBytes << ", retVal=" << retVal << endl;
     ASSERT(retVal == nBytes);
 }
 

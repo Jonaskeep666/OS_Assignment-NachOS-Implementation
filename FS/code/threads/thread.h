@@ -160,7 +160,7 @@ class Thread {
 
     // 23-0302[j]: MP3
     int getPriority() { return (priority); }
-    int setPriority(int p) { priority = p; }
+    void setPriority(int p) { priority = p; }
 
     void Print() { cout << name; }
     void SelfTest();		// test whether thread impl is working

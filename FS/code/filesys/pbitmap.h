@@ -21,6 +21,10 @@
 // the behavior of a bitmap (see bitmap.h), adding the ability to
 // be read from and stored to the disk.
 
+// 23-0504[j]: Bitmap 會在 Memory 被建立，寫回 Disk 時，會存成一個 NachOS File，成為 Persistent Bitmap
+//             預設 Free Sector Bitmap File 存在 Sector 0 = FreeMapSector
+
+
 class PersistentBitmap : public Bitmap {
   public:
     PersistentBitmap(OpenFile *file,int numItems); //initialize bitmap from disk 

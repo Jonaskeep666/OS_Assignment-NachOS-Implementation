@@ -34,7 +34,17 @@ PersistentBitmap::PersistentBitmap(int numItems):Bitmap(numItems)
 //
 //      This constructor initializes the bitmap from a disk file
 //----------------------------------------------------------------------
+/*
+// 23-0504[j]: 有2種 建立 Bitmap 的方式
+1.	在 Memory 中，動態配置一個 Bitmap (in RAM) = Bitmap(int numItems)
+    = PersistentBitmap(int)
 
+2.	假設已開啟「已存在 Disk」的「**Bitmap File**」(NachOS 開機時 即會開啟)
+    = PersistentBitmap(OpenFile*,int)
+    -   Bitmap File 存在 Sector 0
+    -	file->ReadAt((char *)map, numWords * sizeof(unsigned), 0);
+        從 position = 0 處開始讀取，將「numWords * 4」Bytes 的資料 存入 map 指向的空間
+*/
 PersistentBitmap::PersistentBitmap(OpenFile *file, int numItems):Bitmap(numItems) 
 { 
     // map has already been initialized by the BitMap constructor,
@@ -58,7 +68,7 @@ PersistentBitmap::~PersistentBitmap()
 //
 //	"file" is the place to read the bitmap from
 //----------------------------------------------------------------------
-
+// 23-0504[j]: 主要功能：從 File (in Disk) 中讀出 Bitmap，存入 map 指向的空間
 void
 PersistentBitmap::FetchFrom(OpenFile *file) 
 {
@@ -71,7 +81,7 @@ PersistentBitmap::FetchFrom(OpenFile *file)
 //
 //	"file" is the place to write the bitmap to
 //----------------------------------------------------------------------
-
+// 23-0504[j]: 將 map 指向的空間 = 修改的 Bitmap 存入 File (in Disk) 中
 void
 PersistentBitmap::WriteBack(OpenFile *file)
 {

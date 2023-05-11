@@ -229,3 +229,15 @@ hw3t3: hw3t3.c start.o
 	$(CC) $(CFLAGS) -c hw3t3.c
 	$(LD) $(LDFLAGS) start.o hw3t3.o -o hw3t3.coff
 	$(COFF2NOFF) hw3t3.coff hw3t3
+
+FS_test1.o: FS_test1.c
+	$(CC) $(CFLAGS) -c FS_test1.c
+FS_test1: FS_test1.o start.o
+	$(LD) $(LDFLAGS) start.o FS_test1.o -o FS_test1.coff
+	$(COFF2NOFF) FS_test1.coff FS_test1
+
+FS_test2.o: FS_test2.c
+	$(CC) $(CFLAGS) -c FS_test2.c
+FS_test2: FS_test2.o start.o
+	$(LD) $(LDFLAGS) start.o FS_test2.o -o FS_test2.coff
+	$(COFF2NOFF) FS_test2.coff FS_test2

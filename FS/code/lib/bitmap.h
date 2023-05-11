@@ -18,7 +18,12 @@
 #include "copyright.h"
 #include "utility.h"
 
+// 23-0502[j]: Bitmap 就是一串 0101 的 Array，每個 bit 代表一個成員，可設為 0 或 1
+//             此處以 unsigned int 的 1D Array 表示
+
 // Definitions helpful for representing a bitmap as an array of integers
+// 23-0502[j]: 一個 Bytes 有 8個 bits
+//             一個 Word = unsigned Int 的大小 (在 32位元電腦 = 4 Bytes = 32bits)
 const int BitsInByte =	8;
 const int BitsInWord = sizeof(unsigned int) * BitsInByte;
 

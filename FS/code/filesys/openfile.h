@@ -62,6 +62,9 @@ class OpenFile {
 #else // FILESYS
 class FileHeader;
 
+// 23-0502[j]: Real NachOS File System 對 Opened File 的操作
+//             OpenFile 物件 代表 File Header & Seekposition，提供 Read/Write Opened File 的操作
+
 class OpenFile {
   public:
     OpenFile(int sector);		// Open a file whose header is located

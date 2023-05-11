@@ -32,32 +32,45 @@ int SysAdd(int op1, int op2)
   return op1 + op2;
 }
 
+#ifdef FILESYS_STUB
 int SysCreate(char *filename)
 {
 	// return value
 	// 1: success
 	// 0: failed
-	return kernel->fileSystem->Create(filename); // 22-1230[j]: 在 filesys.cc 中實作 
+	return kernel->fileSystem->Create(filename); // 22-1230[j]: 在 filesys.h 中實作 
 }
+#else // FILESYS
+
+// 23-0508[j]: MP4 
+// int SysCreate(char *filename, int size){
+//   return (kernel->fileSystem->Create(filename,size) == TRUE)?1:0 ;
+// }
+int SysCreate(char *filename, int size){
+  return (kernel->fileSystem->Create(filename,size,0) == TRUE)?1:0 ;
+}
+
+#endif // FILESYS
+
 // 23-0103[j]: MP1 作業練習
 // 23-0104[j]: 先瞭解規格 syscall.h 
 // 23-0104[j]: 修改順序 exception.cc -> ksyscall.h -> filesys.h
 // ------------------------------------------------------------------------
 
 OpenFileId SysOpen(char *filename){
-  return kernel->fileSystem->OpenF(filename);
+  return kernel->fileSystem->OpenReturnId(filename);
 }
 
 int SysClose(OpenFileId fileId){
-  return kernel->fileSystem->CloseF(fileId);
+  return kernel->fileSystem->Close(fileId);
 }
 
 int SysWrite(OpenFileId fd,char *buffer, int nBytes){
-  return kernel->fileSystem->WriteF(fd,buffer,nBytes);
+  return kernel->fileSystem->Write(fd,buffer,nBytes);
 }
 
 int SysRead(OpenFileId fd,char *buffer, int nBytes){
-  return kernel->fileSystem->ReadF(fd,buffer,nBytes);
+  return kernel->fileSystem->Read(fd,buffer,nBytes);
 }
 
 // ------------------------------------------------------------------------

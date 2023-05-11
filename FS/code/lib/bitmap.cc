@@ -17,7 +17,7 @@
 //
 //	"numItems" is the number of bits in the bitmap.
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 主要功能：建立 numItems 個 bits 的 Bitmap，並設定初始值「全為0」
 Bitmap::Bitmap(int numItems) 
 { 
     int i;
@@ -25,10 +25,14 @@ Bitmap::Bitmap(int numItems)
     ASSERT(numItems > 0);
 
     numBits = numItems;
+    // 23-0503[j]: Words 的個數採「無條件進位」
     numWords = divRoundUp(numBits, BitsInWord);
+    // 23-0503[j]: 指標 map 指向「unsigned int 陣列」包含 numWords 個元素(至少包含 numBits 個位元)
     map = new unsigned int[numWords];
+
+    // 23-0503[j]: 初始化 所有位元值 = 0
     for (i = 0; i < numWords; i++) {
-	map[i] = 0;		// initialize map to keep Purify happy
+	    map[i] = 0;		// initialize map to keep Purify happy
     }
     for (i = 0; i < numBits; i++) {
         Clear(i);
@@ -51,12 +55,15 @@ Bitmap::~Bitmap()
 //
 //	"which" is the number of the bit to be set.
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 主要功能：設定「第 which 個位元」= 1
 void
 Bitmap::Mark(int which) 
 { 
     ASSERT(which >= 0 && which < numBits);
 
+    // 23-0503[j]: (1)  運算子順序："<<" 優先於 "|"
+    //             (2)  先將 1 左移 (which % 32)
+    //             (3)  再將 map[which/32] | 0000...1...0 等同設定 bit which
     map[which / BitsInWord] |= 1 << (which % BitsInWord);
 
     ASSERT(Test(which));
@@ -68,7 +75,7 @@ Bitmap::Mark(int which)
 //
 //	"which" is the number of the bit to be cleared.
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 主要功能：設定「第 which 個位元」= 0
 void 
 Bitmap::Clear(int which) 
 {
@@ -85,16 +92,16 @@ Bitmap::Clear(int which)
 //
 //	"which" is the number of the bit to be tested.
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 主要功能：若「第 which 個位元」= 1 則 return TRUE；否則 return FALSE
 bool 
 Bitmap::Test(int which) const
 {
     ASSERT(which >= 0 && which < numBits);
     
     if (map[which / BitsInWord] & (1 << (which % BitsInWord))) {
-	return TRUE;
+	    return TRUE;
     } else {
-	return FALSE;
+	    return FALSE;
     }
 }
 
@@ -106,15 +113,20 @@ Bitmap::Test(int which) const
 //
 //	If no bits are clear, return -1.
 //----------------------------------------------------------------------
-
+/*
+// 23-0503[j]: int FindAndSet()
+-	主要功能：Pop out/Set Free Bit
+    -	尋找 & 設定「首個 為0 位元」= 1 (Side effect 才是目的)，並 return Bit # (Pop out Free Bit)
+    -	若沒有「為0位元」則 return -1 (沒有 Free Bit)
+*/
 int 
 Bitmap::FindAndSet() 
 {
     for (int i = 0; i < numBits; i++) {
-	if (!Test(i)) {
-	    Mark(i);
-	    return i;
-	}
+        if (!Test(i)) {
+            Mark(i);
+            return i;
+        }
     }
     return -1;
 }
@@ -124,16 +136,16 @@ Bitmap::FindAndSet()
 // 	Return the number of clear bits in the bitmap.
 //	(In other words, how many bits are unallocated?)
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 主要功能：return 為0位元 的個數 (Num of Clear Bits)
 int 
 Bitmap::NumClear() const
 {
     int count = 0;
 
     for (int i = 0; i < numBits; i++) {
-	if (!Test(i)) {
-	    count++;
-	}
+        if (!Test(i)) {
+            count++;
+        }
     }
     return count;
 }
@@ -145,15 +157,15 @@ Bitmap::NumClear() const
 //	Could be done in a number of ways, but we just print the #'s of
 //	all the bits that are set in the bitmap.
 //----------------------------------------------------------------------
-
+// 23-0503[j]: 印出 哪些位元，其值 = 1 (ex. 0,3,5,6 表示 0110,1001)
 void
 Bitmap::Print() const
 {
     cout << "Bitmap set:\n"; 
     for (int i = 0; i < numBits; i++) {
-	if (Test(i)) {
-	    cout << i << ", ";
-	}
+        if (Test(i)) {
+            cout << i << ", ";
+        }
     }
     cout << "\n"; 
 }

@@ -111,11 +111,23 @@ ExceptionHandler(ExceptionType which)
         // 23-0104[j]: *重要的範例*
         case SC_Create: 
         {
+          #ifdef FILESYS_STUB
+
           // 23-0104[j]: 將傳入System Call的參數，從Reg[4]讀出、存入 val中
           val = kernel->machine->ReadRegister(4);
           char *filename = &(kernel->machine->mainMemory[val]);
           //cout << filename << endl;
+          
           status = SysCreate(filename); // 23-0419[j]: 實際上在 ksyscall 中實作
+
+          #else // FILESYS
+          // 23-0507[j]: MP4 這裏參數個數目不同，須另外處理
+
+          val = kernel->machine->ReadRegister(4);
+          char *filename = &(kernel->machine->mainMemory[val]);
+          status = SysCreate(filename, (int)kernel->machine->ReadRegister(5)); 
+
+          #endif // FILESYS
 
           // 23-0104[j]: 將回傳的參數，存入Reg[2]
           kernel->machine->WriteRegister(2, (int) status);

@@ -55,18 +55,18 @@ class FileSystem {
 // 23-0104[j]: 先瞭解規格 syscall.h 
 // 23-0104[j]: 修改順序 exception.cc -> ksyscall.h -> filesys.h
 
-    OpenFileId OpenF(char *name) {
+    OpenFileId OpenReturnId(char *name) {
       int fileDescriptor = OpenForReadWrite(name, FALSE);
       if (fileDescriptor == -1) return -1;
       else return fileDescriptor;
     }
 
-    int CloseF(OpenFileId fileId) {
+    int Close(OpenFileId fileId) {
       int ret = Close(fileId);
       return ret==0?1:(-1);
     }
 
-    int WriteF(OpenFileId fd,char *buffer, int nBytes){
+    int Write(OpenFileId fd,char *buffer, int nBytes){
       int before = Tell(fd);
       WriteFile(fd,buffer,nBytes);
       int after = Tell(fd);
@@ -74,7 +74,7 @@ class FileSystem {
       else return ((after - before));
     }
 
-    int ReadF(OpenFileId fd,char *buffer, int nBytes){
+    int Read(OpenFileId fd,char *buffer, int nBytes){
       int before = Tell(fd);
       int status = ReadPartial(fd,buffer,nBytes);
       int after = Tell(fd);
@@ -95,31 +95,67 @@ class FileSystem {
 };
 
 #else // FILESYS
+
+#define NumOFTEntries 10    // 23-0507[j]: MP4
+#define pathNameMaxLen 256  // 23-0510[j]: MP4
+typedef int OpenFileId; 
+
 class FileSystem {
   public:
     FileSystem(bool format);		// Initialize the file system.
-					// Must be called *after* "synchDisk" 
-					// has been initialized.
+					// Must be called *after* "synchDisk" has been initialized.
+          // 23-0502[j]: 因為 synchDisk 建構子 才會 new Disk(..)
     					// If "format", there is nothing on
 					// the disk, so initialize the directory
     					// and the bitmap of free blocks.
 
-    bool Create(char *name, int initialSize);  	
+    // bool Create(char *name, int initialSize);  	
 					// Create a file (UNIX creat)
 
-    OpenFile* Open(char *name); 	// Open a file (UNIX open)
+    // OpenFile* Open(char *name); 	// Open a file (UNIX open)
 
-    bool Remove(char *name);  		// Delete a file (UNIX unlink)
+    // bool Remove(char *name);  		// Delete a file (UNIX unlink)
 
-    void List();			// List all the files in the file system
+    // void List();			// List all the files in the file system
 
     void Print();			// List all the files and their contents
 
+    // 23-0507[j]: MP4
+    //             對接 System Call Interface in ksyscall.h
+
+    
+    OpenFileId OpenReturnId(char *name);
+
+    // 23-0507[j]: 只有透過 OpenReturnId(..) 開啟的 NachOS File 才需要 Close()
+    int Close(OpenFileId fileId);  
+
+    int Write(OpenFileId fd,char *buffer, int nBytes);
+
+    int Read(OpenFileId fd,char *buffer, int nBytes);
+
+    // 23-0507[j]: MP4 Subdirectory
+    int PathParse(char *path, char *filename);
+
+    bool Create(char *name, int initialSize, int type); 
+
+    OpenFile* Open(char *absolutePath);
+    
+    void List(char *path, bool recursice);
+
+    bool Remove(char *absolutePath);
+
+    void RecursiveRemove(char *path);
+
   private:
-   OpenFile* freeMapFile;		// Bit map of free disk blocks,
+    OpenFile* freeMapFile;		// Bit map of free disk blocks,
 					// represented as a file
-   OpenFile* directoryFile;		// "Root" directory -- list of 
+    OpenFile* directoryFile;		// "Root" directory -- list of 
 					// file names, represented as a file
+          
+    // 23-0507[j]: 自行新增的 Open File Table，最多開啟 10 File (for User Program)
+    OpenFile* openFileTable[NumOFTEntries];
+    int openFileCount;
+    int FindFreeEntry();
 };
 
 #endif // FILESYS

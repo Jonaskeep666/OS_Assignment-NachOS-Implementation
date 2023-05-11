@@ -22,6 +22,15 @@
 #define FileNameMaxLen 		9	// for simplicity, we assume 
 					// file names are <= 9 characters long
 
+// 23-0511[j]: MP4
+#ifndef NumDirEntries
+#define NumDirEntries 		64
+#endif
+
+// 23-0510[j]: MP4
+#define IsFile  0
+#define IsDir   1
+
 // The following class defines a "directory entry", representing a file
 // in the directory.  Each entry gives the name of the file, and where
 // the file's header is to be found on disk.
@@ -36,6 +45,10 @@ class DirectoryEntry {
 					//   FileHeader for this file 
     char name[FileNameMaxLen + 1];	// Text name for file, with +1 for 
 					// the trailing '\0'
+          
+    // 23-0510[j]: MP4
+    //             0 File/ 1 Dir
+    int isDir;  
 };
 
 // The following class defines a UNIX-like "directory".  Each entry in
@@ -61,8 +74,8 @@ class Directory {
     int Find(char *name);		// Find the sector number of the 
 					// FileHeader for file: "name"
 
-    bool Add(char *name, int newSector);  // Add a file name into the directory
-
+    // bool Add(char *name, int newSector);  // Add a file name into the directory
+    
     bool Remove(char *name);		// Remove a file from the directory
 
     void List();			// Print the names of all the files
@@ -70,6 +83,12 @@ class Directory {
     void Print();			// Verbose print of the contents
 					//  of the directory -- all the file
 					//  names and their contents.
+
+    // 23-0504[j]: MP4
+    bool Add(char *name,int newSector, int isfile);
+    void RecursiveList(int cnt);
+    void RecursiveRemove(PersistentBitmap* freeMap);
+    int IsDirectory(char *name);
 
   private:
     int tableSize;			// Number of directory entries

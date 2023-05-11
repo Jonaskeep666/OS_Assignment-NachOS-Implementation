@@ -36,7 +36,26 @@ const int DiskSize = (MagicSize + (NumSectors * SectorSize));
 //
 //	"toCall" -- object to call when disk read/write request completes
 //----------------------------------------------------------------------
+/*
+// 23-0428[j]: Disk(..)
+-	主要功能：建立模擬Disk(一個 Host File)，當 I/O Request 完成時呼叫 toCall->CallBack()
+    -	DiskName = Disk_%d，其中 %d = kernel->hostName
+    -	若名為 DiskName 存在：
+        檢查 檔案最開頭 的 Magic Number 是否正確，若不正確 -> 印出錯誤訊息
+        ( 呼叫 OpenForReadWrite(..) 即調用 POSIX API open(..)，若檔案存在則進行讀寫操作)
+    -	若名為 DiskName 不存在：
+        -	建立一個 名為 Disk_%d 的檔案(Host File) 
+			會存在 NachOS 執行檔 的同一個資料夾下 (In Host)
+            ( 呼叫 OpenForWrite(..) 即調用 POSIX API open(..)，若檔案存在則進行寫入操作，否則建立新檔案)
+        -	開頭寫入 Magic Number
+        -	結尾寫入 tmp = 0，讓之後 read(..) 不會回傳 EOF
+        
+    -	初始化 active = FALSE
+-	參數：
+    *toCall：指標 指向「引發中斷」的 模擬硬體物件 
+    -> 當 I/O 完成時呼叫 toCall->CallBack() 等同呼叫 模擬硬體物件的 CallBack()
 
+*/
 Disk::Disk(CallBackObj *toCall)
 {
     int magicNum;
@@ -48,18 +67,21 @@ Disk::Disk(CallBackObj *toCall)
     bufferInit = 0;
     
     sprintf(diskname,"DISK_%d",kernel->hostName);
+
     fileno = OpenForReadWrite(diskname, FALSE);
-    if (fileno >= 0) {		 	// file exists, check magic number 
-	Read(fileno, (char *) &magicNum, MagicSize);
-	ASSERT(magicNum == MagicNumber);
+    if (fileno >= 0) {		// file exists, check magic number 
+        Read(fileno, (char *) &magicNum, MagicSize);
+        ASSERT(magicNum == MagicNumber);
     } else {				// file doesn't exist, create it
         fileno = OpenForWrite(diskname);
-	magicNum = MagicNumber;  
-	WriteFile(fileno, (char *) &magicNum, MagicSize); // write magic number
+	    magicNum = MagicNumber;  
+	    WriteFile(fileno, (char *) &magicNum, MagicSize); // write magic number
 
-	// need to write at end of file, so that reads will not return EOF
-        Lseek(fileno, DiskSize - sizeof(int), 0);	
-	WriteFile(fileno, (char *)&tmp, sizeof(int));  
+	    // need to write at end of file, so that reads will not return EOF
+        // 23-0428[j]: Current 從擋頭 往下移 DiskSize - MagicSize 的距離
+        //             將 &tmp 指向的 4 Bytes(都是0) 寫入 檔案中
+        Lseek(fileno, DiskSize - sizeof(int), 0);   
+	    WriteFile(fileno, (char *)&tmp, sizeof(int));  
     }
     active = FALSE;
 }
@@ -79,7 +101,8 @@ Disk::~Disk()
 // Disk::PrintSector()
 // 	Dump the data in a disk read/write request, for debugging.
 //----------------------------------------------------------------------
-
+// 23-0502[j]: PrintSector(..)
+//             主要功能：將 data 位置上的資料 = sector (in Disk) 印出 (For 測試用)
 static void
 PrintSector (bool writing, int sector, char *data)
 {
@@ -90,7 +113,7 @@ PrintSector (bool writing, int sector, char *data)
     else
         cout << "Reading sector: " << sector << "\n"; 
     for (unsigned int i = 0; i < (SectorSize/sizeof(int)); i++) {
-	cout << p[i] << " ";
+	    cout << p[i] << " ";
     }
     cout << "\n"; 
 }
@@ -109,24 +132,38 @@ PrintSector (bool writing, int sector, char *data)
 //	"sectorNumber" -- the disk sector to read/write
 //	"data" -- the bytes to be written, the buffer to hold the incoming bytes
 //----------------------------------------------------------------------
+// 23-0502[j]: ReadRequest/WriteRequest(..)
+//             實際處理 一個 R/W I/O Request(開啟 DiskFile 讀寫 Data)，並安排一個模擬中斷
+//             (比較 SynchDisk::ReadSector() 是「送出」一個 I/O Request 給 Disk，並請 Disk 處理)
 
 void
 Disk::ReadRequest(int sectorNumber, char* data)
 {
+    // 23-0501[j]: 計算從 lastSector 到 newSector 所花費的時間
     int ticks = ComputeLatency(sectorNumber, FALSE);
 
-    ASSERT(!active);				// only one request at a time
+    // 23-0501[j]: (1) 檢查「Disk 在忙嗎？」-> Disk 一次僅處理一個請求
+    //             (2) 檢查「Sector # 有出界嗎？」
+    ASSERT(!active); 			// only one request at a time
     ASSERT((sectorNumber >= 0) && (sectorNumber < NumSectors));
     
     DEBUG(dbgDisk, "Reading from sector " << sectorNumber);
+    // 23-0501[j]: 直接呼叫 Linux POSIX API
+    //             Lseek(fd,offset,Seek位置)：將 Current Pointer 從「Seek位置」移動 offset 距離
+    //             -   SEEK_SET = 0 (檔案 頭)
+    //             -   SEEK_CUR = 1 (目前位置)
+    //             -   SEEK_END = 2 (檔案 尾)
     Lseek(fileno, SectorSize * sectorNumber + MagicSize, 0);
     Read(fileno, data, SectorSize);
     if (debug->IsEnabled('d'))
-	PrintSector(FALSE, sectorNumber, data);
+	    PrintSector(FALSE, sectorNumber, data); // 23-0501[j]: 若開 Debug 模式，印出 Sector # Data
     
+    // 23-0501[j]: 開始讀取，設定 Disk 忙碌中 (active = TRUE)
+    //             並更新 lastSector = 本次 sectorNumber
     active = TRUE;
     UpdateLast(sectorNumber);
-    kernel->stats->numDiskReads++;
+    kernel->stats->numDiskReads++;  // 23-0501[j]: 統計一下 Disk 讀取的資料數
+    // 23-0501[j]: 安排一個「模擬中斷」在過了「ticks 時刻之後引發」(類型是 DiskInt)
     kernel->interrupt->Schedule(this, ticks, DiskInt);
 }
 
@@ -172,21 +209,39 @@ Disk::CallBack ()
 //   	Disk seeks at one track per SeekTime ticks (cf. stats.h)
 //   	and rotates at one sector per RotationTime ticks
 //----------------------------------------------------------------------
-
+/*
+// 23-0428[j]: TimeToSeek(..)
+-   主要功能
+    -	return Disk Head 移動到 newSector 花費的時間(Tick數)
+    -	若移動到 new Track，但 Head 讀取 Sector 到一半，需要等待 (*rotation) 的時間「等它讀完」
+        -> 如此才能開始讀下一個 Sector -> return (*rotation)
+*/
 int
 Disk::TimeToSeek(int newSector, int *rotation) 
 {
+    // 23-0428[j]: Track # = Sector# / 一個 Track 的 Sector 數
     int newTrack = newSector / SectorsPerTrack;
     int oldTrack = lastSector / SectorsPerTrack;
+
+    // 23-0428[j]: 在 stat.h 定義
+	//             RotationTime = 500 (Disk 轉動 1 Sector 的時間)
+	//             SeekTime = 500 (Disk Head 移動 1 Track 的時間)
+
+    // 23-0428[j]: 計算 Seek Time (讀寫頭移動的時間)
     int seek = abs(newTrack - oldTrack) * SeekTime;
 				// how long will seek take?
+
+    // 23-0428[j]: 判斷 Head 是否讀取 Sector 到一半？
+    //             (總Tick數) % RotationTime = 0 (剛好讀完一個 Sector)
+    //             (總Tick數) % RotationTime ≠ 0 (Sector 讀到一半) 
+    //                  -> 還需要轉動 (*rotation) Ticks 的時間，才能讀完目前 Sector
     int over = (kernel->stats->totalTicks + seek) % RotationTime; 
 				// will we be in the middle of a sector when
 				// we finish the seek?
 
     *rotation = 0;
     if (over > 0)	 	// if so, need to round up to next full sector
-   	*rotation = RotationTime - over;
+   	    *rotation = RotationTime - over;
     return seek;
 }
 
@@ -225,27 +280,65 @@ Disk::ModuloDiff(int to, int from)
 //   	The contents of the track buffer are discarded after every seek to 
 //   	a new track.
 //----------------------------------------------------------------------
+/*
+// 23-0428[j]: ComputeLatency(..)
+主要功能：計算 R/W 要花費的時間(以安排 模擬中斷 發生的時間)
+-	若有採用 Track Buffer，則檢查「是否已暫存 目前 Track 所含的所有 Sectors」
+    -	若「(目前時間 - TB開始紀錄時間) > (TB開始紀錄Sector 走到 newSector 的時間)」
+        -> 表示 TB 已經紀錄「超過一圈」
+    -	若是 Read 操作，直接從 TB 取值即可 -> 花費 1 RotationTime 的時間
+        -> Return Latency = 1 RotationTime
 
+-	其餘狀況：Latency = Seek Time + Rotation Latency + transfer time
+    (1)	Seek Time = seek = TimeToSeek(..) 見下方說明(lastSector 到 new Track 的時間差)
+
+    (2)	Rotation Latency = rotation = Part 1 + Part 2
+
+        -	Part 1：從 old Sector 讀到一半 ～ 讀完 Old Sector (可以開始讀下個 Sector 的時間)
+            ( "[---v---],[------]" ～ "[------],v[------]" 的時間差 )
+        -	Part 2：目前位置 轉到 newSector 所花的時間
+
+    (3)	Transfer time = 1 RotationTime = 從 new Sector 開頭 讀到 尾端 的時間差
+    (4)	Return Latency = Seek Time + Rotation Latency + transfer time
+*/
 int
 Disk::ComputeLatency(int newSector, bool writing)
 {
     int rotation;
     int seek = TimeToSeek(newSector, &rotation);
+
+    // 23-0428[j]: timeAfter 表示 Disk Head「定位到 new Track 並可以開始讀下個 Sector」的時間點
+    //             seek = Head 從 lastSector 移動到 newSector 所在 Track
+    //             rotation = 讀完目前所在 Sector 的時間花費
     int timeAfter = kernel->stats->totalTicks + seek + rotation;
 
 #ifndef NOTRACKBUF	// turn this on if you don't want the track buffer stuff
     // check if track buffer applies
+
+    /*
+    // 23-0428[j]: 若 seek = 0 (lastSector & newSector 在同一條 Track 上)
+    -   [X] = (timeAfter - bufferInit) / RotationTime
+            =   (lastSector 定位到 newTrack 的時間點 - TB 開始存 Track 的時間) / RotationTime
+            =   TB 開始存 Track 的時間 到現在，最少儲存的 Sector 數目 = [X] 個 Sectors
+    -   [Y] = ModuloDiff(newSector, bufferInit / RotationTime))
+            =   從 TB 開始紀錄的 Sector 轉到 newSector 要掃過 [Y]個 Sector
+    -   若 [X] > [Y] 表示 TB 已經紀錄同一個 Track 超過一圈 = TB 已經記完 該Track 所有資料
+        -> 故直接花費 1 RotationTime 的時間，將 newSector 的資料從 RAM 中取出即可
+        (若 [X] = [Y] 表示 TB 還沒有 記完 該Track 所有資料)
+    */
     if ((writing == FALSE) && (seek == 0) 
 		&& (((timeAfter - bufferInit) / RotationTime) 
 	     		> ModuloDiff(newSector, bufferInit / RotationTime))) {
         DEBUG(dbgDisk, "Request latency = " << RotationTime);
-	return RotationTime; // time to transfer sector from the track buffer
+	    return RotationTime; // time to transfer sector from the track buffer
     }
 #endif
 
+    // 23-0428[j]: 目前位置 轉到 newSector 所花的時間
     rotation += ModuloDiff(newSector, timeAfter / RotationTime) * RotationTime;
 
     DEBUG(dbgDisk, "Request latency = " << (seek + rotation + RotationTime));
+    // 23-0428[j]: 回傳 Latency = Seek Time + Rotation Latency + transfer time
     return(seek + rotation + RotationTime);
 }
 
@@ -254,15 +347,25 @@ Disk::ComputeLatency(int newSector, bool writing)
 //   	Keep track of the most recently requested sector.  So we can know
 //	what is in the track buffer.
 //----------------------------------------------------------------------
-
+/*
+// 23-0428[j]: UpdateLast(..)
+-   主要功能
+    -	更新 lastSector 為 newSector
+    -	更新 bufferInit (TB 開始存 newTrack 的時刻) = Disk Head 移動到 new Track 的時間點
+        若 現在 Head 不在 new Track(newSector 所在 Track) 上，更新 bufferInit
+*/
 void
 Disk::UpdateLast(int newSector)
 {
     int rotate;
     int seek = TimeToSeek(newSector, &rotate);
     
+    // 23-0428[j]: 若 現在 Head 不在 new Track(newSector 所在 Track) 上
+    //             (seek != 0 代表 Current Head 不在 new Track 上)
+    //             則更新 bufferInit 為 Disk Head 移動到 new Track 的時間點
     if (seek != 0)
-	bufferInit = kernel->stats->totalTicks + seek + rotate;
+	    bufferInit = kernel->stats->totalTicks + seek + rotate;
+
     lastSector = newSector;
     DEBUG(dbgDisk, "Updating last sector = " << lastSector << " , " << bufferInit);
 }

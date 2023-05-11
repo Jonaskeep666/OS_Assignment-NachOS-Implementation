@@ -1,5 +1,7 @@
 # OS Assignment: NachOS Implementation
 
+<img src="assert/NachOS.png" width=500>
+
 ## Assignment
 - MP1：System call implementation 
 - MP2：[Mem] Paging implementation
@@ -7,7 +9,10 @@
   - L1: preemptive SFJ
   - L2: non-preemptive Priority 
   - L3: Round-Robin
-- MP4：[FS] Subdirectory implementation in File System
+- MP4：[FS] File system implementation
+  - Support file I/O system call
+  - Support up to 64MB file size (from 3840 Bytes)
+  - Subdirectory implementation
 
 ## NachOS Folder info
 

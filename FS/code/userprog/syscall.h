@@ -121,10 +121,15 @@ typedef int OpenFileId;
 #define SysConsoleInput	0  
 #define SysConsoleOutput	1  
  
+
 /* Create a Nachos file, with name "name" */
 /* Note: Create does not open the file.   */
 /* Return 1 on success, negative error code on failure */
-int Create(char *name); 
+#ifdef FILESYS_STUB
+int Create(char *name);
+#else // FILESYS
+int Create(char *name, int size);
+#endif // FILESYS
 
 /* Remove a Nachos file, with name "name" */
 int Remove(char *name);

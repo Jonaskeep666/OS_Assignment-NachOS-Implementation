@@ -49,10 +49,30 @@
 
 const int SectorSize = 128;		// number of bytes per disk sector
 const int SectorsPerTrack  = 32;	// number of sectors per disk track 
-const int NumTracks = 32;		// number of tracks per disk
+// const int NumTracks = 32;		// number of tracks per disk
+
+// 23-0508[j]: MP4 將 Disk 擴增到 64 MB
+const int NumTracks = 16384;		// number of tracks per disk
 const int NumSectors = (SectorsPerTrack * NumTracks);
 					// total # of sectors per disk
-
+/*
+// 23-0502[j]: class Disk (繼承於 CallBackObj 自然繼承 CallBack() 方法 )
+	-	主要功能：
+		-	模擬 Physical Disk，提供 Disk 最底層的功能(上層 NachOS API(synchdisk) 會呼叫以下方法)
+			-	模擬 Physical Disk 一次只能處理一個 Access Request
+				當 Disk 收到請求，會立即 return，等到操作完成後再發送 Interrupt 通知 CPU
+				此時 CPU 才可送出下個 Access Request
+			-	操作「模擬 Physical Disk」= 操作一個「UNIX File」
+      
+		-	Track Buffer (in RAM)
+			-	Track Buffer 會暫存「Disk Head 掃過的同一條 Track 的資料」(in RAM)
+				若有 I/O Request 可以直接從此處取值 -> 速度快
+				（ 在設計 Disk Scheduling 時，可以不必設計「Skip-Sector」的排班方式」）
+			-	Track Buffer 僅儲存一個 Track 的資料
+				（ 在 Disk Head 開始讀取 下一個 Track 時，會先將自己清空 ）
+			-	開關：可在 build.linux/Makefile 中，可決定是否採用 Track Buffer，宣告下可「關閉」此功能
+				> DEFINES =  -DNOTRACKBUF 
+*/
 class Disk : public CallBackObj {
   public:
     Disk(CallBackObj *toCall);          // Create a simulated disk.  
@@ -76,11 +96,13 @@ class Disk : public CallBackObj {
 					// (seek + rotational delay + transfer)
 
   private:
-    int fileno;				// UNIX file number for simulated disk 
+    int fileno;				      // UNIX file number for simulated disk 
     char diskname[32];			// name of simulated disk's file
     CallBackObj *callWhenDone;		// Invoke when any disk request finishes
-    bool active;     			// Is a disk operation in progress?
-    int lastSector;			// The previous disk request 
+    bool active;     			  // Is a disk operation in progress?
+    int lastSector;			    // The previous disk request 
+
+    // 23-0428[j]: Track Buffer 開始暫存「目前 Track 資料」的時刻
     int bufferInit;			// When the track buffer started 
 					// being loaded
 

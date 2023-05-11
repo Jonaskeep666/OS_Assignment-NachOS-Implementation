@@ -71,6 +71,9 @@ Kernel::Kernel(int argc, char **argv)
 	    	consoleOut = argv[i + 1];
 	    	i++;
 #ifndef FILESYS_STUB
+// 23-0507[j]: 若採用 Real NachOS File System
+
+        // 23-0507[j]: 格式化 Nachos 的模擬 Disk
 		} else if (strcmp(argv[i], "-f") == 0) {
 	    	formatFlag = TRUE;
 #endif
@@ -135,7 +138,10 @@ Kernel::Initialize()
 #ifdef FILESYS_STUB
     fileSystem = new FileSystem();
 #else
+
+    // 23-0507[j]: 根據 formatFlag 來決定是否「格式化」
     fileSystem = new FileSystem(formatFlag);
+
 #endif // FILESYS_STUB
     // 23-0301[j]: 應 MP3 要求，將以下註解掉
     // postOfficeIn = new PostOfficeInput(10);

@@ -26,6 +26,14 @@
 // making a request, it waits around until the operation finishes before
 // returning.
 
+/*
+// 23-0427[j]: class SynchDisk 
+  -	假設 Physical Disk 一次只能處理一個 Access Request
+    -	class SynchDisk 的功能是「提供一個 同步的 Disk Interface = User 取用 Disk 需透過本層」
+  -	同步 每個人發出的 Access Requests = 確保一次發出一個 I/O Request 給 Disk
+    = 確保 Disk 完成上個操作，才處理下一個請求
+*/
+
 class SynchDisk : public CallBackObj {
   public:
     SynchDisk();    		        // Initialize a synchronous disk,

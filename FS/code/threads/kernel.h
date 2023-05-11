@@ -74,8 +74,8 @@ class Kernel {
     Machine *machine;           // the simulated CPU
     SynchConsoleInput *synchConsoleIn;
     SynchConsoleOutput *synchConsoleOut;
-    SynchDisk *synchDisk;
-    FileSystem *fileSystem;     
+    SynchDisk *synchDisk;       // 23-0507[j]: 提供 User 操作 Disk 的介面
+    FileSystem *fileSystem;     // 23-0507[j]: NachOS File System(包含 Dir、Bitmap)
     PostOfficeInput *postOfficeIn;
     PostOfficeOutput *postOfficeOut;
 
