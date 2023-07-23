@@ -1,6 +1,6 @@
 # OS Assignment: NachOS Implementation
 
-<img src="assert/NachOS.jpeg" width=600>
+<img src="assets/NachOS.jpeg" width=600>
 
 ## Assignment
 - MP1：System call implementation 

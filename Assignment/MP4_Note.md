@@ -26,8 +26,8 @@
 
 ## [A] 建立 NachOS File System
 
--	<img src="assert/main.jpeg" width=500>
--	<img src="assert/FS_Struct.jpeg" width=300>
+-	<img src="assets/main.jpeg" width=500>
+-	<img src="assets/FS_Struct.jpeg" width=300>
 
 ### [A.1] 設定
 -	在 build.linux/Makefile 中，可決定是否採用 NachOS 的檔案系統
@@ -181,7 +181,7 @@
 				-	若有採用 Track Buffer，則檢查「是否已暫存 目前 Track 所含的所有 Sectors」
 					-	若「(目前時間 - TB開始紀錄時間) > (TB開始紀錄Sector 走到 newSector 的時間)」
 						-> 表示 TB 已經紀錄「超過一圈」
-						![](./assert/trackbuffer1.jpeg)
+						![](assets/trackbuffer1.jpeg)
 					-	若是 Read 操作，直接從 TB 取值即可 -> 花費 1 RotationTime 的時間
 						-> Return Latency = 1 RotationTime
 
@@ -290,7 +290,7 @@
 		-	基本操作
 			-	void Mark(int which);   	
 				-	主要功能：設定「第 which 個位元」= 1
-				-	![](assert/Bitmap1.jpeg)
+				-	![](assets/Bitmap1.jpeg)
 			-	void Clear(int which);
 				-	主要功能：設定「第 which 個位元」= 0
 
@@ -356,7 +356,7 @@
 		(真實 FS 的 FCB 仍會包含「存取權限、Owner、上一次修改時間...etc」)
 
 	-	實作方式
-		-	![](assert/FileHeader1.jpeg)
+		-	![](assets/FileHeader1.jpeg)
 
 		-	File Size：用2個int變數 numBytes & numSectors 表示 File 的大小(Bytes) & File 所包含的 Sectors 數目
 		-	Location Table
@@ -474,18 +474,18 @@
 						-   查詢 File Header 找出 第 i * SectorSize 個 Bytes 在哪個 Sector #
 							-   sectorNumber = hdr->ByteToSector(i * SectorSize) 
 						-   將讀出的 Sector 存入 buf[ (i - firstSector) * SectorSize ]
-						-   ![](assert/ReadAt1.jpeg)
+						-   ![](assets/ReadAt1.jpeg)
 						
                		4.	將 position 處開始往後 numBytes 的資料，複製到 into指向空間 中
 						```C++
 						bcopy(&buf[position - (firstSector * SectorSize)], into, numBytes);
 						```
-						-	![](assert/ReadAt2.jpeg)
+						-	![](assets/ReadAt2.jpeg)
 
 					5.	return numBytes;
 						
 				-	WriteAt(..)：將「已修改資料 = from指向空間」+「部分未修改的原資料」存入 buf 後，再整個 WriteBack；最後回傳 numBytes
-					-	![](assert/WriteAt1.jpeg)
+					-	![](assets/WriteAt1.jpeg)
 					1.	檢查 參數是否合法，若不合法 且 無法修正，則 return 0
 					2.	計算 要存取的「1st Sector & last Sector & Sector 數目」
 					3.	工具配置
@@ -625,7 +625,7 @@
 
 	-	File System 結構
 		-	Formatting(格式化)：在 Raw Disk 上 建立 File System，需要建立 Directory File & Bitmap File
-			![](assert/Format1.jpeg)
+			![](assets/Format1.jpeg)
 		-	Directory
 			-	NachOS 預設 1-Level Directory，實作為一個 Directory Table (Filename <-> FCB Sector #)
 				-	Entry 數目 = Directory->tableSize
@@ -673,7 +673,7 @@
 			-	主要功能：格式化 raw Disk 並 Open Dir & Bitmap File
 				-	若 format = TRUE，表示 Disk 需要「格式化」-> 建立 new Directory & Free Bitmap
 					-	new PersistentBitmap、Directory、FileHeader (Bitmap、Directory) 為了使用 Bitmap & Directory 的方法
-						-	![](assert/FS1.jpeg)
+						-	![](assets/FS1.jpeg)
 
 					-	先分配、建立 File Header(FCB) for Bitmap & Dir
 					1.	[修改 Bitmap：配 1 Sector 給 File Header]
@@ -691,7 +691,7 @@
 						-	其中 Bitmap 已經有修改過(已分配了 4 Sectors 給 Bitmap FCB、Bitmap File、Dir FCB、Dir File)
 						-	其中 Directory File 則為空(尚未建立任何 File + name + FCB location 在裡面)
 					
-					-	![](assert/FS2.jpeg)
+					-	![](assets/FS2.jpeg)
 					
 				-	若 format = FALSE，表示 Disk 不需要「格式化」-> 開啟 Old Directory & Free Bitmap
 					-	[Open File] 
@@ -701,7 +701,7 @@
 		-	bool Create(char *name, int initialSize);
 			-	背景：NachOS 預設 FS 不支援「Runtime 改變 File Size」，故須在此「固定檔案大小」
 			-	主要功能：Create new File = 修改 Dir & Bitmap 並建立 File Header 
-				-	![](assert/FS3.jpeg)
+				-	![](assets/FS3.jpeg)
 				1.	Load Directory 到 Memory
 				2.	檢查 Directory 是否存在「同名 File」
 					-	若是 return FALSE
@@ -799,7 +799,7 @@
 		Ans：
 		-	inode (in Linux) 就是 File Control Block(FCB)
 			儲存 inode #、Permission、Date、Owner、File Size、Ref. Count、Data Block Location ... etc
-			<img src="assert/inode.jpeg" width=200>
+			<img src="assets/inode.jpeg" width=200>
 
 		-	在 NachOS FS 中 就是 File Header
 
@@ -1052,7 +1052,7 @@
 				3.	Double indirect (32*32 Entries)：32*32*128 = 131072 B = 128 KB
 				4.	Triple indirect [16] 共 16組
 					(16*32*32*32 Entries)：16*32*32*32*128 = 67108864 B = 64 MB
-			![](assert/MultiLvIndex1.jpeg)  
+			![](assets/MultiLvIndex1.jpeg)  
 
 	-	資料結構(變數成員) in class FileHeader
 		-	File Size：int numBytes; int numSectors;	
@@ -1064,7 +1064,7 @@
 				int **dTable;
 			-	int tripleLv[16];
 				int ****tTable;
-		![](assert/MultiLvIndex2.jpeg)  
+		![](assets/MultiLvIndex2.jpeg)  
 
 	-	修改的檔案
 		-	Disk.h 中 將 NumTracks 改為 16384，使 Disk 擴增到 64 MB
@@ -1256,7 +1256,7 @@
 				將「某個目錄」以下的 table[i].name 印出
 				若 table[i].isDir = 1 則 再次呼叫 RecursiveList(cnt+3) 將其下元素印出
 				其中 cnt 表示 遞迴深度：遞迴越深，一開始要印出的空格越多 
-			-	<img src="assert/RecursiveList1.jpeg" width= 500>
+			-	<img src="assets/RecursiveList1.jpeg" width= 500>
 
 		-	void RecursiveRemove(PersistentBitmap* freeMap);
 			-	主要功能：

@@ -239,7 +239,7 @@ FileSystem::FileSystem(bool format)
 // 23-0507[j]: bool Create(char *name, int initialSize);
 -	背景：NachOS 預設 FS 不支援「Runtime 改變 File Size」，故須在此「固定檔案大小」
 -	主要功能：Create new File = 修改 Dir & Bitmap 並建立 File Header 
-    -	![](assert/FS3.jpeg)
+    -	![](assets/FS3.jpeg)
         1.	Load Directory 到 Memory
         2.	檢查 Directory 是否存在「同名 File」
             -	若是 return FALSE
